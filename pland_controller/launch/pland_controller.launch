@@ -1,0 +1,65 @@
+<launch>
+    <!-- MAVROS 飞机本体状态话题 -->
+    <arg name="odom_topic" default="/mavros/local_position/odom" />
+    <arg name="gps_topic" default="/mavros/global_position/global" />
+    <arg name="rangefinder_topic" default="/mavros/distance_sensor/rangefinder_pub" />
+    <arg name="rel_alt_topic" default="/mavros/global_position/rel_alt" />
+
+    <!-- 视觉检测目标话题 (来自 pland_detector) -->
+    <arg name="target_pose_topic" default="/pland/target_pose" />
+    <arg name="target_vel_topic" default="/pland/target_vel" />
+
+    <!-- GPS 外部注入目标话题 (经纬高 sensor_msgs/NavSatFix 与速度 geometry_msgs/TwistStamped) -->
+    <arg name="inject_target_pose_topic" default="/pland/inject_target_pose" />
+    <arg name="inject_target_vel_topic" default="/pland/inject_target_vel" />
+
+    <!-- 控制输出与飞控交互接口 -->
+    <arg name="cmd_vel_topic" default="/pland/cmd_vel" />
+    <arg name="setpoint_raw_topic" default="/mavros/setpoint_raw/local" />
+    <arg name="arming_service" default="/mavros/cmd/arming" />
+    <arg name="command_service" default="/mavros/cmd/command" />
+    <arg name="set_mode_service" default="/mavros/set_mode" />
+
+    <!-- 启停与控制指令话题 (std_msgs/Empty) 与状态监控话题 -->
+    <arg name="start_topic" default="/pland/start" />
+    <arg name="cancel_topic" default="/pland/cancel" />
+    <arg name="state_topic" default="/pland/state" />
+
+    <!-- 控制循环执行频率 (Hz) -->
+    <arg name="control_rate" default="20.0" />
+
+    <!-- ========================================== -->
+    <!-- 动态控制参数配置文件路径 (运行时修改自动写回) -->
+    <!-- ========================================== -->
+    <arg name="param_config_path" default="$(find pland_controller)/config/pland_controller.yaml" />
+    <!-- 硬件/机架静态配置文件路径 (不参与动态参数写回) -->
+    <arg name="drone_config_path" default="$(find pland_controller)/config/drone_config.yaml" />
+
+    <node pkg="pland_controller" type="pland_controller_node" name="pland_controller_node" output="screen">
+        <!-- 静态话题与接口参数 -->
+        <param name="odom_topic" value="$(arg odom_topic)" />
+        <param name="gps_topic" value="$(arg gps_topic)" />
+        <param name="rangefinder_topic" value="$(arg rangefinder_topic)" />
+        <param name="rel_alt_topic" value="$(arg rel_alt_topic)" />
+        <param name="target_pose_topic" value="$(arg target_pose_topic)" />
+        <param name="target_vel_topic" value="$(arg target_vel_topic)" />
+        <param name="inject_target_pose_topic" value="$(arg inject_target_pose_topic)" />
+        <param name="inject_target_vel_topic" value="$(arg inject_target_vel_topic)" />
+
+        <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)" />
+        <param name="setpoint_raw_topic" value="$(arg setpoint_raw_topic)" />
+        <param name="arming_service" value="$(arg arming_service)" />
+        <param name="command_service" value="$(arg command_service)" />
+        <param name="set_mode_service" value="$(arg set_mode_service)" />
+
+        <param name="start_topic" value="$(arg start_topic)" />
+        <param name="cancel_topic" value="$(arg cancel_topic)" />
+        <param name="state_topic" value="$(arg state_topic)" />
+        <param name="control_rate" value="$(arg control_rate)" />
+
+        <!-- 动态参数同步配置文件路径 -->
+        <param name="param_config_path" value="$(arg param_config_path)" />
+        <!-- 硬件静态配置文件路径 -->
+        <param name="drone_config_path" value="$(arg drone_config_path)" />
+    </node>
+</launch>

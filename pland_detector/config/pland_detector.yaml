@@ -1,0 +1,19 @@
+# ==========================================
+# Pland Detector 运行时动态同步配置文件
+# 运行中通过 `rosparam set` 修改的参数会自动持久化写回本文件
+# ==========================================
+
+# 是否启用检测功能
+enable_detection: true
+
+# 是否发布标注了检测框的调试图像
+publish_debug_image: true
+
+# 云台回传角度单位是否为度 (度转弧度)
+gimbal_in_degrees: true
+
+# 目标移动速度死区阈值 (米/秒)，低于该值视为静止
+velocity_deadzone: 0.2
+
+# 云台固定角模式 (true: 垂直地面绝对角; false: 相对机体角)
+gimbal_abs: false

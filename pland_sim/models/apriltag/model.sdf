@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<sdf version="1.4">
+  <model name="apriltag">
+    <static>false</static>
+    <link name="link">
+      <pose>0 0 0 0 1.57079632679 1.57079632679</pose>
+      <!-- <gravity>0</gravity> -->
+
+      <!-- 开启运动学模式：它不受其他物体撞击影响，但能完美托举和推动其他物体 -->
+      <kinematic>true</kinematic>
+
+      <inertial>
+        <mass>1000000.0</mass> <!-- 保留你的大质量也没问题 -->
+      </inertial>
+
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <!-- 本质是0.01x0.5x0.5 -->
+            <uri>model://apriltag/meshes/apriltag.dae</uri>
+            <scale>1.0 3.0 3.0</scale>
+          </mesh>
+        </geometry>
+      </visual>
+      <!-- ======= 下面是你必须增加的碰撞与摩擦力属性 ======= -->
+      <collision name="collision">
+        <pose>0 0 0.75 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 1.5 1.5</size>
+          </box>
+        </geometry>
+
+        <!-- 给表面增加极大的摩擦力，确保在圆周运动时东西不会被离心力甩飞 -->
+        <surface>
+          <friction>
+            <ode>
+              <mu>100.0</mu>
+              <mu2>100.0</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+      <!-- =================================================== -->
+    </link>
+    <plugin name="planar_move" filename="libgazebo_ros_planar_move.so">
+      <commandTopic>/apriltag/cmd_vel</commandTopic>
+      <odometryTopic>/apriltag/odom</odometryTopic>
+      <odometryFrame>odom</odometryFrame>
+      <robotBaseFrame>apriltag</robotBaseFrame>
+      <odometryRate>50</odometryRate>
+    </plugin>
+  </model>
+</sdf>

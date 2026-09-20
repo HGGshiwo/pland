@@ -1,0 +1,59 @@
+<launch>
+    <!-- MAVROS 里程计与机体系位姿/速度来源 -->
+    <arg name="odom_topic" default="/mavros/local_position/odom" />
+    <!-- 原始相机图像 -->
+    <arg name="image_topic" default="/roscam/cam/image_raw" />
+    <!-- 标注与检测结果图像发布话题 -->
+    <arg name="detect_topic" default="/pland/detect" />
+    <!-- 目标机体相对位姿 (base_link FLU，供控制器闭环) 与 ENU 调试绝对位姿 (map，供RViz显示) -->
+    <arg name="target_pose_topic" default="/pland/target_pose" />
+    <arg name="debug_target_pose_topic" default="/pland/target_pose_enu" />
+    <arg name="target_vel_topic" default="/pland/target_vel" />
+    <!-- 目标图像归一化像素坐标话题 (geometry_msgs/PointStamped, x=u/w, y=v/h) -->
+    <arg name="target_pixel_topic" default="/pland/target_pixel" />
+    <!-- 重置控制话题 (std_msgs/Empty) -->
+    <arg name="reset_topic" default="/pland/reset" />
+
+    <!-- 云台话题 -->
+    <arg name="gimbal_roll_topic" default="/gimbal/roll" />
+    <arg name="gimbal_pitch_topic" default="/gimbal/current_pitch" />
+    <arg name="gimbal_yaw_topic" default="/gimbal/yaw" />
+
+    <!-- AprilTag 与图案配置 (用于底层对象构造) -->
+    <arg name="tag_family" default="tag36h11" />
+    <arg name="tag_config_file_path" default="$(find pland_detector)/config/tag_pos_map.json" />
+
+    <!-- ========================================== -->
+    <!-- 动态可调参数配置文件路径 (运行时修改自动写回) -->
+    <!-- ========================================== -->
+    <arg name="param_config_path" default="$(find pland_detector)/config/pland_detector.yaml" />
+    <!-- 硬件/机架静态配置文件路径 (不参与动态参数写回) -->
+    <arg name="drone_config_path" default="$(find pland_controller)/config/drone_config.yaml" />
+
+    <node pkg="pland_detector" type="pland_detector_node" name="pland_detector_node" output="screen">
+        <!-- 静态话题与构造参数 -->
+        <param name="odom_topic" value="$(arg odom_topic)" />
+        <param name="image_topic" value="$(arg image_topic)" />
+        <param name="detect_topic" value="$(arg detect_topic)" />
+        <param name="target_pose_topic" value="$(arg target_pose_topic)" />
+        <param name="debug_target_pose_topic" value="$(arg debug_target_pose_topic)" />
+        <param name="target_vel_topic" value="$(arg target_vel_topic)" />
+        <param name="target_pixel_topic" value="$(arg target_pixel_topic)" />
+        <param name="reset_topic" value="$(arg reset_topic)" />
+
+        <param name="gimbal_roll_topic" value="$(arg gimbal_roll_topic)" />
+        <param name="gimbal_pitch_topic" value="$(arg gimbal_pitch_topic)" />
+        <param name="gimbal_yaw_topic" value="$(arg gimbal_yaw_topic)" />
+
+        <param name="tag_family" value="$(arg tag_family)" />
+        <param name="tag_config_file_path" value="$(arg tag_config_file_path)" />
+
+        <!-- 动态参数同步配置文件路径 -->
+        <param name="param_config_path" value="$(arg param_config_path)" />
+        <!-- 硬件静态配置文件路径 -->
+        <param name="drone_config_path" value="$(arg drone_config_path)" />
+
+        <!-- 相机内参: [fx, 0, cx, 0, fy, cy, 0, 0, 1] -->
+        <rosparam param="camera_inner_matrix">[554.38271282264407, 0.0, 320.5, 0.0, 554.38271282264407, 240.5, 0.0, 0.0, 1.0]</rosparam>
+    </node>
+</launch>
