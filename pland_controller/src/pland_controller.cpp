@@ -25,8 +25,6 @@ void PlandController::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
                          "/pland/cmd_vel");
   pnh.param<std::string>("setpoint_raw_topic", setpoint_raw_topic_,
                          "/mavros/setpoint_raw/local");
-  pnh.param<std::string>("arming_service", arming_service_,
-                         "/mavros/cmd/arming");
   pnh.param<std::string>("command_service", command_service_,
                          "/mavros/cmd/command");
   pnh.param<std::string>("set_mode_service", set_mode_service_,
@@ -37,7 +35,6 @@ void PlandController::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
       nh_.advertise<geometry_msgs::TwistStamped>(cmd_vel_topic_, 10);
   setpoint_raw_pub_ =
       nh_.advertise<mavros_msgs::PositionTarget>(setpoint_raw_topic_, 10);
-  arming_client_ = nh_.serviceClient<mavros_msgs::CommandBool>(arming_service_);
   command_client_ = nh_.serviceClient<mavros_msgs::CommandLong>(command_service_);
   set_mode_client_ = nh_.serviceClient<mavros_msgs::SetMode>(set_mode_service_);
 

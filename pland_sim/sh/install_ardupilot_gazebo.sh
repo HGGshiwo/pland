@@ -1,4 +1,4 @@
-cd /tmp
+cd $HOME
 
 if [ ! -d "ardupilot_gazebo" ]; then
     git clone https://github.com/HGGshiwo/ardupilot_gazebo.git ardupilot_gazebo

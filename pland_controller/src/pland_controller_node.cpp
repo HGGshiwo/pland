@@ -30,7 +30,6 @@ public:
     std::string inject_target_vel_topic;
     std::string cmd_vel_topic;
     std::string setpoint_raw_topic;
-    std::string arming_service;
     std::string command_service;
     std::string set_mode_service;
     std::string start_topic;
@@ -57,8 +56,6 @@ public:
                            "/pland/cmd_vel");
     pnh_.param<std::string>("setpoint_raw_topic", setpoint_raw_topic,
                            "/mavros/setpoint_raw/local");
-    pnh_.param<std::string>("arming_service", arming_service,
-                           "/mavros/cmd/arming");
     pnh_.param<std::string>("command_service", command_service,
                            "/mavros/cmd/command");
     pnh_.param<std::string>("set_mode_service", set_mode_service,

@@ -42,6 +42,11 @@ struct DetectorResult {
   cv::Point2d target_pixel_norm = cv::Point2d(0, 0);    // 归一化像素坐标 (u/width, v/height)，范围 [0.0, 1.0]
   int image_width = 0;
   int image_height = 0;
+
+  // --- OSD 可视化附加状态 (即使本帧检测失败，也携带最近一次估计值) ---
+  double drone_z = 0.0;        // 无人机当前飞行高度 (m, ENU)
+  bool target_moving = false;  // 目标是否处于运动状态 (TargetTracker 判定)
+  double target_speed = 0.0;   // 目标水平合速度 (m/s, CTRV EKF 估计, 含死区)
 };
 
 struct PnpResultBody {

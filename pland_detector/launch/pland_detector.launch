@@ -13,6 +13,8 @@
     <arg name="target_pixel_topic" default="/pland/target_pixel" />
     <!-- 重置控制话题 (std_msgs/Empty) -->
     <arg name="reset_topic" default="/pland/reset" />
+    <!-- 控制器状态机状态话题 (std_msgs/String, 用于调试图像 OSD 显示) -->
+    <arg name="state_topic" default="/pland/state" />
 
     <!-- 云台话题 -->
     <arg name="gimbal_roll_topic" default="/gimbal/roll" />
@@ -40,6 +42,7 @@
         <param name="target_vel_topic" value="$(arg target_vel_topic)" />
         <param name="target_pixel_topic" value="$(arg target_pixel_topic)" />
         <param name="reset_topic" value="$(arg reset_topic)" />
+        <param name="state_topic" value="$(arg state_topic)" />
 
         <param name="gimbal_roll_topic" value="$(arg gimbal_roll_topic)" />
         <param name="gimbal_pitch_topic" value="$(arg gimbal_pitch_topic)" />

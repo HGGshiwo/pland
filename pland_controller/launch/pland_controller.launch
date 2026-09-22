@@ -16,7 +16,6 @@
     <!-- 控制输出与飞控交互接口 -->
     <arg name="cmd_vel_topic" default="/pland/cmd_vel" />
     <arg name="setpoint_raw_topic" default="/mavros/setpoint_raw/local" />
-    <arg name="arming_service" default="/mavros/cmd/arming" />
     <arg name="command_service" default="/mavros/cmd/command" />
     <arg name="set_mode_service" default="/mavros/set_mode" />
 
@@ -48,7 +47,6 @@
 
         <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)" />
         <param name="setpoint_raw_topic" value="$(arg setpoint_raw_topic)" />
-        <param name="arming_service" value="$(arg arming_service)" />
         <param name="command_service" value="$(arg command_service)" />
         <param name="set_mode_service" value="$(arg set_mode_service)" />
 

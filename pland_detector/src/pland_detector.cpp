@@ -185,6 +185,12 @@ void PlandDetector::detect(DetectorResult &output) {
     return;
 
   output.stamp = stamp_tracker;
+
+  // OSD 状态快照：即使本帧检测失败，也携带最近一次估计的运动与高度状态
+  output.drone_z = get_current_z();
+  output.target_moving = target_tracker_ && target_tracker_->isMoving();
+  output.target_speed = kf_xy_ ? kf_xy_->get_vel().norm() : 0.0;
+
   double elapsed = now - stamp_tracker;
   if (elapsed > 0.15) {
     ROS_WARN_STREAM("[PlandDetector] image stamp too late: " << elapsed);
@@ -350,6 +356,10 @@ void PlandDetector::detect(DetectorResult &output) {
   if (v_xy_enu.norm() < velocity_deadzone_) {
     v_xy_enu.setZero();
   }
+
+  // 刷新 OSD 状态字段为本帧最新估计
+  output.target_moving = (target_state == TargetState::MOVING);
+  output.target_speed = v_xy_enu.norm();
 
   output.target_yaw_body = kf_yaw_->get_yaw();
   output.target_pos_enu.head<2>() = kf_xy_->get_pos();

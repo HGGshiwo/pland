@@ -9,7 +9,6 @@
 
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
-#include <mavros_msgs/CommandBool.h>
 #include <mavros_msgs/CommandLong.h>
 #include <mavros_msgs/PositionTarget.h>
 #include <mavros_msgs/SetMode.h>
@@ -83,7 +82,6 @@ private:
   std::string target_vel_topic_ = "/pland/target_vel";
   std::string cmd_vel_topic_ = "/pland/cmd_vel";
   std::string setpoint_raw_topic_ = "/mavros/setpoint_raw/local";
-  std::string arming_service_ = "/mavros/cmd/arming";
   std::string command_service_ = "/mavros/cmd/command";
   std::string set_mode_service_ = "/mavros/set_mode";
   std::string gps_topic_ = "/mavros/global_position/global";
@@ -91,7 +89,6 @@ private:
   ros::NodeHandle nh_;
   ros::Publisher cmd_vel_pub_;
   ros::Publisher setpoint_raw_pub_;
-  ros::ServiceClient arming_client_;
   ros::ServiceClient command_client_;
   ros::ServiceClient set_mode_client_;
   ros::Subscriber gps_sub_;
