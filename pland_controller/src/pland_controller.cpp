@@ -65,6 +65,8 @@ void PlandController::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("min_gamma_xy", min_gamma_xy_);
   sync.bind("max_gamma_z", max_gamma_z_);
   sync.bind("vision_kp", vision_kp_);
+  sync.bind("vision_kd", vision_kd_);
+  sync.bind("max_yaw_rate", max_yaw_rate_);
 
   // 对齐容差与阈值
   sync.bind("xy_align_thresh", xy_align_thresh_);
@@ -187,6 +189,12 @@ Eigen::Vector3d PlandController::get_ff_vel_body() const {
   return ff_vel_body;
 }
 
+Eigen::Vector2d PlandController::get_drone_vel_body_xy() const {
+  // 注意：MAVROS /mavros/local_position/odom 中的 twist.twist 自身 child_frame_id 已经是 base_link (机体系 FLU)
+  // 切不可再乘以 R(-yaw) 旋转矩阵，否则会导致坐标系二次旋转引起正反馈振荡！
+  return vel_enu_.head<2>();
+}
+
 Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
   Eigen::Vector3d err_body = detector_target_pos_body_;
   double err_yaw = detector_target_yaw_body_;
@@ -202,32 +210,43 @@ Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
 
   auto ff_vel_body = get_ff_vel_body();
 
-  // 2. 偏航-平移协同降速：严格参考 dankong/include/features/pland/landing_controller.hpp 第 651-658 行
-  // 当航向误差大时，衰减水平速度，优先自旋对齐机头，防止大自转与平移耦合产生切向画圈
-  double abs_yaw_err_deg = std::abs(err_yaw) * 180.0 / M_PI;
-  double yaw_penalty = 1.0;
-  if (abs_yaw_err_deg > 20.0) {
-    yaw_penalty = std::max(0.1, 1.0 - 0.9 * (abs_yaw_err_deg - 20.0) / 40.0);
-  }
-
-  // 水平速度指令 (反馈速度受 max_speed_xy * yaw_penalty 限幅，前馈速度受 max_ff_vel 限幅)
+  // 2. 偏航-平移解耦控制 (位置优先，防止远距离大旋转产生离心画圈)
+  double xy_error_norm = err_body.head<2>().norm();
+  
+  // 水平速度指令 (加入纯视觉相对速度阻尼项 Kd_xy，消除左右晃动与超调)
   double Kp_xy = vision_kp_;
-  double max_v_xy = max_speed_xy_ * yaw_penalty;
+  double Kd_xy = vision_kd_;
+  double max_v_xy = max_speed_xy_;
 
-  Eigen::Vector2d fb_vel_xy(Kp_xy * err_body.x(), Kp_xy * err_body.y());
+  Eigen::Vector2d v_drone_body_xy = get_drone_vel_body_xy();
+  Eigen::Vector2d v_rel_xy = v_drone_body_xy - ff_vel_body.head<2>();
+
+  Eigen::Vector2d fb_vel_xy = Kp_xy * err_body.head<2>() - Kd_xy * v_rel_xy;
   if (max_v_xy > 0.0 && fb_vel_xy.norm() > max_v_xy) {
     fb_vel_xy = fb_vel_xy.normalized() * max_v_xy;
   }
 
   Eigen::Vector2d vel_xy = fb_vel_xy + ff_vel_body.head<2>();
 
-  // 3. 偏航角速度指令 (包含角速度前馈)
-  double Kp_yaw = gamma_yaw_ > 0.0 ? gamma_yaw_ : 1.0;
-  double omega_z = Kp_yaw * err_yaw + ff_omega;
-  omega_z = std::clamp(omega_z, -0.5, 0.5);
+  // 3. 偏航角速度指令：平滑自适应位置解耦 (远距离全力平移对中，正上方全额对齐机头)
+  double yaw_weight = 1.0;
+  double max_decouple_radius = std::max(0.8, current_z * 0.15); // 随着高度平滑自适应放宽
+  double min_decouple_radius = 0.35;
+
+  if (xy_error_norm > max_decouple_radius) {
+    yaw_weight = 0.0; // 远距离时严禁偏航自转，确保飞机笔直冲向靶心，彻底消除离心画圈
+  } else if (xy_error_norm > min_decouple_radius) {
+    yaw_weight = 1.0 - (xy_error_norm - min_decouple_radius) / (max_decouple_radius - min_decouple_radius);
+  } else {
+    yaw_weight = 1.0; // 接近靶标正上方，全额开启偏航对齐
+  }
+
+  double Kp_yaw = gamma_yaw_ > 0.0 ? gamma_yaw_ : 1.5;
+  double omega_z = (Kp_yaw * err_yaw * yaw_weight) + ff_omega;
+  double max_w = max_yaw_rate_ > 0.0 ? max_yaw_rate_ : 1.2;
+  omega_z = std::clamp(omega_z, -max_w, max_w);
 
   // 4. 垂直下降速度计算 (动态漏斗对齐控制)
-  double xy_error_norm = err_body.head<2>().norm();
 
   double align_dist_thresh =
       std::max(max_funnel_radius_, current_z * funnel_radius_k_);
@@ -253,6 +272,7 @@ Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
                   std::max(0.001, hold_dist_thresh - align_dist_thresh);
   }
 
+  double abs_yaw_err_deg = std::abs(err_yaw) * 180.0 / M_PI;
   double yaw_descent_min_deg = 15.0;
   double yaw_descent_max_deg = 35.0;
   double yaw_descent_factor = 1.0;
@@ -469,9 +489,10 @@ void PlandController::step() {
     auto raw_target_vel = get_tracing_detector_target_vel();
     double total_max_speed_xy =
         max_speed_xy_ + (use_ff_vel_ ? max_ff_vel_ : 0.0);
+    double max_w = max_yaw_rate_ > 0.0 ? max_yaw_rate_ : 1.2;
     auto smooth_vel = velocity_smoother_.apply_constraints(
         raw_target_vel, yaw_enu_, dt,
-        total_max_speed_xy, max_vel_z_, 0.5,
+        total_max_speed_xy, max_vel_z_, max_w,
         acc_xy, decel_xy);
     cmd_vel(smooth_vel);
     return;

@@ -157,12 +157,16 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
   if (!tag_config_file_path_.empty()) {
     load_tag_config(tag_config_file_path_);
   }
+
+  pnh.param<bool>("enable_c2f_enhancement", enable_c2f_enhancement_, true);
+  clahe_ = cv::createCLAHE(2.0, cv::Size(8, 8));
 }
 
 void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   // 动态参数：直接绑定变量，从 YAML/rosparam 读取，未提供则报错跳过
   sync.bind("velocity_deadzone", velocity_deadzone_);
   sync.bind("gimbal_abs", gimbal_abs_);
+  sync.bind("enable_c2f_enhancement", enable_c2f_enhancement_);
 }
 
 void PlandDetector::reset() {
@@ -173,6 +177,40 @@ void PlandDetector::reset() {
   last_ekf_stamp_ = 0.0;
   has_last_valid_pos_ = false;
   last_valid_enu_pos_ = Eigen::Vector3d::Zero();
+}
+
+cv::Rect PlandDetector::find_texture_roi(const cv::Mat &gray) const {
+  if (gray.empty()) {
+    return cv::Rect(0, 0, 0, 0);
+  }
+
+  // 1. 降采样到 320x240 极速计算能量 (耗时 < 0.2ms)
+  cv::Mat small;
+  cv::resize(gray, small, cv::Size(320, 240), 0, 0, cv::INTER_AREA);
+
+  // 2. Laplacian 边缘高频梯度计算
+  cv::Mat lap, abs_lap;
+  cv::Laplacian(small, lap, CV_16S, 3);
+  cv::convertScaleAbs(lap, abs_lap);
+
+  // 3. 盒状滤波平滑纹理能量
+  cv::Mat blurred;
+  cv::blur(abs_lap, blurred, cv::Size(15, 15));
+
+  // 4. 寻找最大能量峰值
+  cv::Point max_loc;
+  cv::minMaxLoc(blurred, nullptr, nullptr, nullptr, &max_loc);
+
+  int cx = max_loc.x * 2;
+  int cy = max_loc.y * 2;
+  int roi_size = 240;
+
+  int x1 = std::max(0, std::min(gray.cols - roi_size, cx - roi_size / 2));
+  int y1 = std::max(0, std::min(gray.rows - roi_size, cy - roi_size / 2));
+  int w = std::min(roi_size, gray.cols - x1);
+  int h = std::min(roi_size, gray.rows - y1);
+
+  return cv::Rect(x1, y1, w, h);
 }
 
 void PlandDetector::detect(DetectorResult &output) {
@@ -186,8 +224,9 @@ void PlandDetector::detect(DetectorResult &output) {
 
   output.stamp = stamp_tracker;
 
+  double current_z = get_current_z();
   // OSD 状态快照：即使本帧检测失败，也携带最近一次估计的运动与高度状态
-  output.drone_z = get_current_z();
+  output.drone_z = current_z;
   output.target_moving = target_tracker_ && target_tracker_->isMoving();
   output.target_speed = kf_xy_ ? kf_xy_->get_vel().norm() : 0.0;
 
@@ -208,15 +247,55 @@ void PlandDetector::detect(DetectorResult &output) {
   }
   Eigen::Matrix3d hist_R_wb = hist_q.toRotationMatrix();
 
-  // 2. 图像预处理与基础检测
-  cv::Mat current_img = pland_image_;
+  // 2. 图像预处理与自适应多尺度检测
+  cv::Mat current_img = pland_image_.clone();
   if (current_img.empty())
     return;
-  output.detected = current_img.clone();
 
-  cv::Mat gray;
-  cv::cvtColor(current_img, gray, cv::COLOR_BGR2GRAY);
-  auto detections = tag_detector_->detect(gray);
+  output.detected = current_img.clone();
+  SafeDetections detections(nullptr);
+
+  if (enable_c2f_enhancement_ && current_z > 5.0) {
+    // 【高空段 > 5.0m】：C2F 纹理粗检 240x240 ROI + 局域 2.0x 双三次插值超分与反锐化 (此时靶标完整落入240x240内)
+    cv::Mat gray_orig;
+    cv::cvtColor(current_img, gray_orig, cv::COLOR_BGR2GRAY);
+    cv::Rect roi_rect = find_texture_roi(gray_orig);
+
+    if (roi_rect.width > 0 && roi_rect.height > 0) {
+      cv::Mat roi = current_img(roi_rect);
+      cv::Mat roi_zoom, norm, gaussian, roi_enh, gray_zoom;
+      cv::resize(roi, roi_zoom, cv::Size(), 2.0, 2.0, cv::INTER_CUBIC);
+      cv::normalize(roi_zoom, norm, 10, 245, cv::NORM_MINMAX);
+      cv::GaussianBlur(norm, gaussian, cv::Size(0, 0), 2.5);
+      cv::addWeighted(norm, 1.8, gaussian, -0.8, 0, roi_enh);
+      cv::cvtColor(roi_enh, gray_zoom, cv::COLOR_BGR2GRAY);
+
+      detections = tag_detector_->detect(gray_zoom);
+
+      // 将在 2x 局部 ROI (480x480) 上的角点与中心坐标精确逆映射回原图 (640x480) 空间
+      for (int i = 0; i < detections.size(); ++i) {
+        apriltag_detection_t* det = detections[i];
+        if (det) {
+          det->c[0] = det->c[0] / 2.0 + roi_rect.x;
+          det->c[1] = det->c[1] / 2.0 + roi_rect.y;
+          for (int k = 0; k < 4; ++k) {
+            det->p[k][0] = det->p[k][0] / 2.0 + roi_rect.x;
+            det->p[k][1] = det->p[k][1] / 2.0 + roi_rect.y;
+          }
+        }
+      }
+    } else {
+      detections = tag_detector_->detect(gray_orig);
+    }
+  } else {
+    // 【中低空段 <= 6.0m】：CLAHE 全图直方图均衡化送检 (保证4个大Tag与中心25个小Tag全部完整送检，杜绝裁切)
+    cv::Mat gray;
+    cv::cvtColor(current_img, gray, cv::COLOR_BGR2GRAY);
+    if (enable_c2f_enhancement_ && clahe_) {
+      clahe_->apply(gray, gray);
+    }
+    detections = tag_detector_->detect(gray);
+  }
 
   if (!current_pattern_)
     return;
@@ -340,7 +419,6 @@ void PlandDetector::detect(DetectorResult &output) {
       target_tracker_->update(raw_target_enu.head<2>());
 
   double dist_xy = pnp_body.pos_body.head<2>().norm();
-  double current_z = get_current_z();
   double current_visual_angle_deg =
       std::atan2(dist_xy, current_z) * 180.0 / M_PI;
 

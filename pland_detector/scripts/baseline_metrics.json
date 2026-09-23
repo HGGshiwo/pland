@@ -1,0 +1,29 @@
+{
+  "label": "修复前 (Baseline)",
+  "total_frames": 1069,
+  "valid_detections": 864,
+  "overall_rate_pct": 80.82319925163705,
+  "avg_latency_ms": 33.3,
+  "max_latency_ms": 58.2,
+  "fps": 30.0,
+  "first_lock_alt": 11.53,
+  "max_consecutive_lost_frames": 148,
+  "stat_high": {
+    "count": 242,
+    "valid": 53,
+    "rate": 21.90082644628099,
+    "avg_lat": 33.3
+  },
+  "stat_mid": {
+    "count": 616,
+    "valid": 616,
+    "rate": 100.0,
+    "avg_lat": 33.3
+  },
+  "stat_low": {
+    "count": 211,
+    "valid": 195,
+    "rate": 92.41706161137441,
+    "avg_lat": 33.3
+  }
+}

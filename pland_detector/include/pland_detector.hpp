@@ -65,6 +65,8 @@ private:
   // --- 动态可调参数 (支持运行时修改并持久化) ---
   double velocity_deadzone_ = 0.0; // 移动物体速度死区阈值 (m/s)
   bool gimbal_abs_ = false; // 云台固定角模式(垂直地面)
+  bool enable_c2f_enhancement_ = true; // 是否开启高空粗检ROI与低空自适应图像增强
+  cv::Ptr<cv::CLAHE> clahe_;
 
   // --- 静态配置参数 (在 launch / 构造函数中指定) ---
   Eigen::Matrix3d camera_inner_matrix_ = Eigen::Matrix3d::Identity();
@@ -118,6 +120,9 @@ private:
   double get_current_z() const {
     return std::abs(pos_enu_.z());
   }
+
+  // --- 图像粗检定位 ---
+  cv::Rect find_texture_roi(const cv::Mat &gray) const;
 
   // 动态获取相机光学系(C) 到 机体系(B) 的旋转矩阵
   Eigen::Matrix3d get_dynamic_camera_to_body_rotation(

@@ -89,6 +89,17 @@ class SafeDetections {
         other.detections_ = nullptr;
     }
 
+    SafeDetections& operator=(SafeDetections&& other) noexcept {
+        if (this != &other) {
+            if (detections_ != nullptr) {
+                apriltag_detections_destroy(detections_);
+            }
+            detections_ = other.detections_;
+            other.detections_ = nullptr;
+        }
+        return *this;
+    }
+
     int size() const { return detections_ ? zarray_size(detections_) : 0; }
 
     // 重载 [] 操作符，像用 std::vector 一样用它
@@ -125,6 +136,8 @@ class SafeAprilTagDetector {
         td_ = apriltag_detector_create();
         apriltag_detector_add_family(td_, tf_);
         td_->nthreads = threads;
+        td_->quad_decimate = 1.0f;
+        td_->refine_edges = 1;
     }
 
     ~SafeAprilTagDetector() {

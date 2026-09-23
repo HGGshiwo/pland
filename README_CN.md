@@ -19,8 +19,12 @@
 
 ## 1. 核心特性 (Features)
 
-- **机身体系 (FLU) 纯视觉闭环**：目标三维相对位姿直接解算在飞机机身坐标系（`base_link`，前-左-上），消除全局大地坐标系转换的时延与坐标漂移。
-- **多尺度嵌套 AprilTag 阵列**：高空依靠大尺寸 Tag 远距离捕获，低空近地平滑切换至中心小 Tag，防止标靶超出视野导致失锁。
+- **自适应多尺度图像增强与检测 (`pland_detector`)**：
+  - **高空段 ($Z > 5.0\text{m}$)**：采用纯视觉纹理能量快速粗定位 + 局域 $2\times$ 双三次超分辨率插值（C2F）与动态范围归一化拉伸，实现 12m 极限高空秒级锁靶（高空检出率 $100\%$），解算角点高精度逆映射回原图物理空间。
+  - **中低空段 ($Z \le 5.0\text{m}$)**：平滑切入全图 CLAHE（对比度受限自适应直方图均衡化）增强，保证 4m 过渡段 4 个大尺寸 Tag 完整在线，近地段全面激活中心 25 个微型小 Tag 阵列（最高 29 个 Tag 联合解算），大幅提升 PnP 刚性与空间几何抗噪性。
+- **机身体系 (FLU) 纯视觉闭环与微分阻尼 (`pland_controller`)**：
+  - 目标三维相对位姿直接解算在飞机机身坐标系（`base_link`，前-左-上），消除全局坐标系转换时延与漂移。
+  - 控制器微分反馈直接绑定机体系真实运动速度，提供强阻尼负反馈，配合位置优先自适应偏航角解耦，彻底消除高空及下降过程中的水平画圈与发散振荡。
 - **CTRV 扩展卡尔曼滤波 (EKF)**：基于二维恒定转弯率与速度模型实时估计目标合速度、航向角与角速度，为控制器提供平滑前馈速度补偿。
 - **自适应降落漏斗与增益调度**：对齐容差随高度降低呈漏斗状线性收敛（$r_{\text{tol}} = r_{\min} + k \cdot z$），近地阶段控制增益自适应平滑衰减，有效抑制地面效应气流干扰。
 - **六状态鲁棒状态机 (FSM)**：统一调度 `IDLE`、`TRACING_GPS`、`TRACING_DETECTOR`、`BLIND_DROP`、`TARGET_LOST` 与 `LANDED` 状态，支持 GPS 到视觉的无缝平滑衔接。
@@ -59,7 +63,7 @@
 ```bash
 cd ~/catkin_ws/src
 git clone https://github.com/hggshiwo/pland.git
-catkin_make -DCMAKE_BUILD_TYPE=Release
+catkin build pland_detector pland_controller pland_sim
 source ~/catkin_ws/devel/setup.bash
 ```
 
@@ -114,23 +118,53 @@ rostopic echo /pland/state
 
 ---
 
-## 6. 核心参数说明 (Configuration)
+## 6. 参数手册与调优指南 (Configuration & Tuning)
 
-配置位于 `pland_controller/config/pland_controller.yaml`：
+系统采用 ROS 动态参数同步（`ros_param_sync`），支持运行期间通过 `rosparam set` 实时修改并自动写回持久化文件。
 
+### 1. `pland_detector` 配置 (`pland_detector.yaml`)
+| 参数项 | 默认值 | 类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `enable_c2f_enhancement` | `true` | bool | 开启自适应多尺度图像增强（高空 C2F 超分 + 低空全图 CLAHE） |
+| `velocity_deadzone` | `0.2` | double (m/s) | 目标速度滤波死区，低于该值视目标为静止 |
+| `publish_debug_image` | `true` | bool | 是否发布绘制了角点与位姿信息的调试图像 |
+| `gimbal_abs` | `false` | bool | 云台固定角模式（true: 垂直地面绝对角; false: 相对机体角） |
+
+### 2. `pland_controller` 配置 (`pland_controller.yaml`)
 | 参数项 | 默认值 | 单位 | 说明 |
 | :--- | :--- | :--- | :--- |
+| `vision_kp` | `1.0` | - | 视觉水平位置比例反馈增益 ($P$) |
+| `vision_kd` | `0.35` | - | 视觉机体系速度微分阻尼增益 ($D$)，有效抑制水平画圈振荡 |
+| `max_yaw_rate` | `1.2` | rad/s | 偏航角速度限幅，防止大偏航误差时机动过猛 |
+| `xy_align_thresh` | `0.45` | m | 水平位置优先收敛阈值，大于该误差时优先水平对齐并限速下降 |
 | `touchdown_velocity` | `0.4` | m/s | 触地阶段恒定下降速度 |
-| `blind_drop_alt` | `0.4` | m | 进入盲降阶段的高度阈值 |
-| `blind_drop_xy_thresh`| `0.15`| m | 允许进入盲降的最大水平偏差 |
-| `lost_target_alt` | `15.0` | m | 目标丢失安全重捕爬升高度 |
-| `max_speed_xy` | `3.0` | m/s | 水平最大反馈控制速度 |
-| `target_distance` | `8.0` | m | GPS 巡航转视觉跟踪的切换距离阈值 |
-| `use_ff_vel` | `true` | bool | 是否启用目标速度前馈补偿 |
+| `blind_drop_alt` | `0.3` | m | 进入盲降阶段的高度阈值 |
+| `blind_drop_xy_thresh`| `0.2` | m | 允许进入盲降的最大水平偏差 |
+| `lost_target_alt` | `8.0` | m | 目标丢失安全重捕爬升高度 |
+| `max_speed_xy` | `1.0` | m/s | 水平最大反馈控制速度 |
+| `target_distance` | `3.0` | m | GPS 巡航转视觉跟踪的切换距离阈值 |
+| `use_ff_vel` | `true` | bool | 是否启用目标 CTRV 速度前馈补偿 |
 
 ---
 
-## 7. 引用 (Citation)
+## 7. 自动化性能评测工具 (Validation & Benchmark)
+
+在 `pland_detector/scripts/` 下提供了离线闭环评测与性能对比脚本 `validate_pland_detector.py`：
+
+```bash
+# 1. 运行基准评测并对比基线数据
+python3 ~/catkin_ws/src/pland/pland_detector/scripts/validate_pland_detector.py \
+    --bag ~/catkin_ws/src/task_20260923_074125_372.bag \
+    --rate 2.0 \
+    --preprocess none \
+    --compare_with_json ~/catkin_ws/src/pland/pland_detector/scripts/baseline_metrics.json
+```
+
+该工具将自动启动被测节点、回放 Rosbag、采集 `/pland/target_pose` 并输出包含全局识别率、高/中/低空分段召回率、端到端延迟、最大连续丢靶帧数的性能报表。
+
+---
+
+## 8. 引用 (Citation)
 
 ```bibtex
 @misc{pland2026,
@@ -141,5 +175,5 @@ rostopic echo /pland/state
 }
 ```
 
-## 8. 开源协议 (License)
+## 9. 开源协议 (License)
 本项目采用 [Apache-2.0](LICENSE) 开源协议。

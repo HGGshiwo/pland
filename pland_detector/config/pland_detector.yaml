@@ -17,3 +17,6 @@ velocity_deadzone: 0.2
 
 # 云台固定角模式 (true: 垂直地面绝对角; false: 相对机体角)
 gimbal_abs: false
+
+# 是否开启高空纹理粗检ROI锐化与低空CLAHE自适应图像增强
+enable_c2f_enhancement: true

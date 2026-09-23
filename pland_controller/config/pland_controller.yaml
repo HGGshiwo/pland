@@ -7,11 +7,13 @@ max_speed_xy: 1
 max_vel_z: 1
 decay_start_z: 3
 limit_start_z: 3
-gamma_yaw: 1
+gamma_yaw: 1.5
+max_yaw_rate: 1.2
 max_gamma_xy: 0.25
 min_gamma_xy: 0.1
 max_gamma_z: 0.5
 vision_kp: 1
+vision_kd: 0.35
 xy_align_thresh: 0.45
 yaw_align_thresh: 0.2
 blind_drop_xy_thresh: 0.2

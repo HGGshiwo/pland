@@ -48,7 +48,9 @@ private:
   double max_gamma_xy_ = 0.0;            // 水平位置反馈增益上限
   double min_gamma_xy_ = 0.0;            // 水平位置反馈增益下限
   double max_gamma_z_ = 0.0;             // 垂直位置反馈增益上限
-  double vision_kp_ = 0.0;               // 纯视觉相对速度控制增益
+  double vision_kp_ = 0.0;               // 纯视觉相对速度控制增益 (Kp)
+  double vision_kd_ = 0.0;               // 纯视觉相对速度阻尼增益 (Kd, 消除摆动)
+  double max_yaw_rate_ = 1.2;            // 偏航角速度控制上限 (rad/s)
 
   // 对齐容差与阈值
   double xy_align_thresh_ = 0.0;         // 水平对齐允许下降的误差门限 (m)
@@ -177,6 +179,7 @@ private:
   bool detector_target_valid() const;
 
   Eigen::Vector3d get_ff_vel_body() const;
+  Eigen::Vector2d get_drone_vel_body_xy() const;
   Eigen::Vector4d get_tracing_detector_target_vel();
 
   void cmd_vel(const Eigen::Vector4d &vel_body);
