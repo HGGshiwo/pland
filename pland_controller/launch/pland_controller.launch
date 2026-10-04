@@ -7,6 +7,7 @@
 
     <!-- 视觉检测目标话题 (来自 pland_detector) -->
     <arg name="target_pose_topic" default="/pland/target_pose" />
+    <arg name="target_err_enu_topic" default="/pland/target_err_enu" />
     <arg name="target_vel_topic" default="/pland/target_vel" />
 
     <!-- GPS 外部注入目标话题 (经纬高 sensor_msgs/NavSatFix 与速度 geometry_msgs/TwistStamped) -->
@@ -41,6 +42,7 @@
         <param name="rangefinder_topic" value="$(arg rangefinder_topic)" />
         <param name="rel_alt_topic" value="$(arg rel_alt_topic)" />
         <param name="target_pose_topic" value="$(arg target_pose_topic)" />
+        <param name="target_err_enu_topic" value="$(arg target_err_enu_topic)" />
         <param name="target_vel_topic" value="$(arg target_vel_topic)" />
         <param name="inject_target_pose_topic" value="$(arg inject_target_pose_topic)" />
         <param name="inject_target_vel_topic" value="$(arg inject_target_vel_topic)" />

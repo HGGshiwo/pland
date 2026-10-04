@@ -40,16 +40,16 @@ class PoseHistory {
         }
     }
 
+    // 云台角查询: 区间内线性插值; 超出范围直接取最近的已知样本(最新值);
+    // 仅在从未收到数据(空缓存)时失败, 由调用方走固定云台默认角
     bool get_scalar_at(const std::deque<ScalarRecord>& buf, double t,
                        double& out) {
         if (buf.empty()) return false;
         if (t <= buf.front().stamp) {
-            if (buf.front().stamp - t > MAX_TOLERANCE_SEC) return false;
             out = buf.front().value;
             return true;
         }
         if (t >= buf.back().stamp) {
-            if (t - buf.back().stamp > MAX_TOLERANCE_SEC) return false;
             out = buf.back().value;
             return true;
         }

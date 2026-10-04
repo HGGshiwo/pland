@@ -25,6 +25,7 @@ public:
     std::string rangefinder_topic;
     std::string rel_alt_topic;
     std::string target_pose_topic;
+    std::string target_err_enu_topic;
     std::string target_vel_topic;
     std::string inject_target_pose_topic;
     std::string inject_target_vel_topic;
@@ -46,6 +47,8 @@ public:
                            "/mavros/global_position/rel_alt");
     pnh_.param<std::string>("target_pose_topic", target_pose_topic,
                            "/pland/target_pose");
+    pnh_.param<std::string>("target_err_enu_topic", target_err_enu_topic,
+                           "/pland/target_err_enu");
     pnh_.param<std::string>("target_vel_topic", target_vel_topic,
                            "/pland/target_vel");
     pnh_.param<std::string>("inject_target_pose_topic", inject_target_pose_topic,
@@ -118,9 +121,10 @@ public:
     sub_rel_alt_ = nh_.subscribe(
         rel_alt_topic, 10, &PlandControllerNode::relAltCallback, this);
 
-    // 6. 订阅视觉检测目标 (PoseStamped & TwistStamped)
-    sub_target_pose_ = nh_.subscribe(
-        target_pose_topic, 10, &PlandControllerNode::targetPoseCallback, this);
+    // 6. 订阅视觉检测目标 (ENU 误差 PoseStamped & TwistStamped)
+    sub_target_err_enu_ = nh_.subscribe(
+        target_err_enu_topic, 10,
+        &PlandControllerNode::targetErrEnuCallback, this);
     sub_target_vel_ = nh_.subscribe(
         target_vel_topic, 10, &PlandControllerNode::targetVelCallback, this);
 
@@ -145,8 +149,8 @@ public:
 
     ROS_INFO("[PlandControllerNode] Initialized at rate: %.1f Hz.", control_rate);
     ROS_INFO("[PlandControllerNode] Subscribing to odom: %s", odom_topic.c_str());
-    ROS_INFO("[PlandControllerNode] Subscribing to target_pose: %s",
-             target_pose_topic.c_str());
+    ROS_INFO("[PlandControllerNode] Subscribing to target_err_enu: %s",
+             target_err_enu_topic.c_str());
     ROS_INFO("[PlandControllerNode] Subscribing to target_vel: %s",
              target_vel_topic.c_str());
     ROS_INFO("[PlandControllerNode] Subscribing to inject_pose (GPS NavSatFix): %s",
@@ -172,10 +176,12 @@ private:
                            msg->pose.pose.orientation.x,
                            msg->pose.pose.orientation.y,
                            msg->pose.pose.orientation.z);
-    vel_enu_ << msg->twist.twist.linear.x, msg->twist.twist.linear.y,
+    // odom twist 为机体系 FLU (child_frame_id=base_link), 由控制器内部旋到 ENU
+    Eigen::Vector3d vel_body;
+    vel_body << msg->twist.twist.linear.x, msg->twist.twist.linear.y,
         msg->twist.twist.linear.z;
 
-    controller_->update_drone_state(t, pos_enu_, orientation_, vel_enu_);
+    controller_->update_drone_state(t, pos_enu_, orientation_, vel_body);
   }
 
   void rangefinderCallback(const sensor_msgs::Range::ConstPtr &msg) {
@@ -195,22 +201,23 @@ private:
     }
   }
 
-  void targetPoseCallback(const geometry_msgs::PoseStamped::ConstPtr &msg) {
+  void targetErrEnuCallback(const geometry_msgs::PoseStamped::ConstPtr &msg) {
     double t = msg->header.stamp.toSec();
     if (t <= 0.0) {
       t = ros::Time::now().toSec();
     }
 
-    Eigen::Vector3d target_pos_body(msg->pose.position.x,
-                                    msg->pose.position.y,
-                                    msg->pose.position.z);
+    // position = 机体误差矢量经图像时刻姿态仅旋转到 ENU 方向轴 (只旋转不平移)
+    Eigen::Vector3d target_err_enu(msg->pose.position.x,
+                                   msg->pose.position.y,
+                                   msg->pose.position.z);
     Eigen::Quaterniond q(msg->pose.orientation.w, msg->pose.orientation.x,
                          msg->pose.orientation.y, msg->pose.orientation.z);
     double target_yaw_body = std::atan2(
         2.0 * (q.w() * q.z() + q.x() * q.y()),
         1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
 
-    controller_->update_detector_target(t, target_pos_body,
+    controller_->update_detector_target(t, target_err_enu,
                                        last_detector_vel_enu_, target_yaw_body);
   }
 
@@ -302,7 +309,7 @@ private:
   ros::Subscriber sub_odom_;
   ros::Subscriber sub_rangefinder_;
   ros::Subscriber sub_rel_alt_;
-  ros::Subscriber sub_target_pose_;
+  ros::Subscriber sub_target_err_enu_;
   ros::Subscriber sub_target_vel_;
   ros::Subscriber sub_inject_target_pose_;
   ros::Subscriber sub_inject_target_vel_;

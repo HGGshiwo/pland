@@ -7,11 +7,12 @@ Pland Detector 识别效果与性能自动化验证评测脚本
 2. 自动重放指定 rosbag 图像与里程计数据进行闭环评测
 3. 实时采集节点输出话题 (/pland/target_pose, /pland/target_pixel 等)
 4. 统计并对比：
-   - 全局识别成功率与各高度分段识别率 (高空 >8m, 中空 3~8m, 低空 <=3m)
+   - 全局识别成功率与各高度分段识别率 (每 5m 一个高度区间)
    - 处理速度与耗时延迟 (平均延迟, 最大延迟, 处理帧率 FPS)
    - 连续丢靶事件与最长失锁中断时长 (Target Lost 分析)
    - 首次锁靶时间与首次识别高度
-5. 支持基线 (修复前) 与优化版 (修复后) A/B 双向对比报表输出
+5. 评测结束自动弹出逐帧统计图窗口 (每条消息的识别状态与滑动识别率、tag 检出数量、飞行高度折线 + 每 5m 分段明细)
+6. 支持基线 (修复前) 与优化版 (修复后) A/B 双向对比报表输出
 
 使用示例：
 ------------------------------------------------------------------------------
@@ -62,7 +63,7 @@ try:
     from sensor_msgs.msg import Image
     from nav_msgs.msg import Odometry
     from geometry_msgs.msg import PoseStamped, PointStamped, TwistStamped
-    from std_msgs.msg import Float64
+    from std_msgs.msg import Float64, Int32
     from cv_bridge import CvBridge
 except ImportError:
     print("[Error] ROS Python libraries (rospy, rosbag, cv_bridge) not found. Please source your catkin workspace!")
@@ -194,12 +195,158 @@ class ImageEnhancer:
         return out_msg
 
 
+def compute_altitude_bins(matched_results, bin_size=5.0):
+    """按固定高度区间 (默认每 5m) 统计识别率与平均延迟，替代旧的高/中/低空三段分类"""
+    num_bins = 0
+    for r in matched_results:
+        idx = int(max(0.0, r["alt"]) // bin_size)
+        num_bins = max(num_bins, idx + 1)
+
+    bins = []
+    for idx in range(num_bins):
+        lo, hi = idx * bin_size, (idx + 1) * bin_size
+        frames = [r for r in matched_results if lo <= max(0.0, r["alt"]) < hi]
+        valid_c = sum(1 for f in frames if f["valid"])
+        lats = [f["latency_ms"] for f in frames if f["latency_ms"] is not None]
+        bins.append({
+            "lo": lo,
+            "hi": hi,
+            "label": f"{lo:.0f}~{hi:.0f}m",
+            "count": len(frames),
+            "valid": valid_c,
+            "rate": (valid_c / len(frames)) * 100.0 if frames else 0.0,
+            "avg_lat": float(np.mean(lats)) if lats else 0.0
+        })
+    return bins
+
+
+def show_altitude_rate_chart(metrics, save_path=None, show=True):
+    """弹出逐帧评测统计图: 以飞行高度为横轴逐条绘制, 包含识别状态与滑动识别率、tag 检出数量两条折线 + 每 5m 分段文字明细"""
+    frame_valid = metrics.get("frame_valid") or []
+    if not frame_valid:
+        print("[Chart] 无逐帧统计数据，跳过绘图")
+        return
+    frame_tags = metrics.get("frame_tag_count") or [0] * len(frame_valid)
+    frame_alt = metrics.get("frame_alt") or [0.0] * len(frame_valid)
+    bins = metrics.get("alt_bins_5m") or []
+
+    import matplotlib
+    matplotlib.use("TkAgg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    # 选择中文字体，避免图中中文显示为方框 (WSL 下可直接借用 Windows 字体)
+    cjk = None
+    for name in ["WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "Microsoft YaHei", "SimHei", "Noto Sans CJK SC"]:
+        if any(f.name == name for f in font_manager.fontManager.ttflist):
+            cjk = name
+            break
+    if cjk is None:
+        for path in ["/mnt/c/Windows/Fonts/msyh.ttc", "/mnt/c/Windows/Fonts/simhei.ttf"]:
+            if os.path.exists(path):
+                try:
+                    if hasattr(font_manager, "addfont"):
+                        font_manager.fontManager.addfont(path)
+                    cjk = font_manager.FontProperties(fname=path).get_name()
+                    break
+                except Exception:
+                    pass
+    if cjk:
+        plt.rcParams["font.family"] = cjk
+    plt.rcParams["axes.unicode_minus"] = False
+
+    overall_rate = metrics.get("overall_rate_pct", 0.0)
+
+    fig = plt.figure(figsize=(15.5, 9.0))
+    fig.suptitle(f"Pland Detector 逐帧识别统计  ({metrics.get('label', '')})   "
+                 f"全局识别率 {overall_rate:.2f}% ({metrics.get('valid_detections', 0)}/{metrics.get('total_frames', 0)})",
+                 fontsize=14, fontweight="bold")
+
+    # 横轴: 飞行高度 (m), 刻度约取 10 个
+    alt_min, alt_max = min(frame_alt), max(frame_alt)
+    span = max(1.0, alt_max - alt_min)
+    step = next((s for s in [0.5, 1.0, 2.0, 5.0, 10.0] if span / s <= 12), 10.0)
+    x0 = np.floor(alt_min / step) * step
+    x1 = np.ceil(alt_max / step) * step
+    xticks = list(np.arange(x0, x1 + step / 2, step))
+
+    left, width = 0.06, 0.55
+    rows = [0.53, 0.08]               # 两个子图底部位置
+    h = 0.38
+
+    # 子图1: 逐帧识别状态 (0/1) + 滑动窗口识别率, 横轴为高度
+    ax1 = fig.add_axes([left, rows[0], width, h])
+    ax1.step(frame_alt, frame_valid, where="post", color="#9e9e9e", linewidth=0.8)
+    ax1.set_ylim(-0.15, 1.15)
+    ax1.set_yticks([0, 1])
+    ax1.set_yticklabels(["未识别", "识别"])
+    ax1.set_ylabel("识别状态")
+    ax1.grid(axis="both", linestyle=":", alpha=0.5, zorder=0)
+    win = 20
+    if len(frame_valid) >= win:
+        rolling = np.convolve(frame_valid, np.ones(win) / win, mode="valid") * 100.0
+        ax1r = ax1.twinx()
+        ax1r.plot(frame_alt[win - 1:], rolling, color="#1f77b4", linewidth=1.8,
+                  label=f"滑动识别率 (每{win}帧)")
+        ax1r.axhline(overall_rate, color="#d9483b", linestyle="--", linewidth=1.2,
+                     label=f"全局 {overall_rate:.1f}%")
+        ax1r.set_ylim(0, 108)
+        ax1r.set_ylabel("滑动识别率 (%)")
+        ax1r.legend(loc="upper right", fontsize=8.5)
+
+    # 子图2: 逐帧识别出的 tag 数量, 横轴为高度
+    ax2 = fig.add_axes([left, rows[1], width, h], sharex=ax1)
+    ax2.plot(frame_alt, frame_tags, color="#2e9e4f", linewidth=1.1)
+    ax2.fill_between(frame_alt, frame_tags, color="#2e9e4f", alpha=0.15)
+    ax2.set_ylabel("识别 tag 数量")
+    ax2.set_xlabel("飞行高度 (m)")
+    ax2.set_ylim(0, max(1.5, max(frame_tags) + 0.5))
+    ax2.grid(axis="both", linestyle=":", alpha=0.5, zorder=0)
+    for ax in (ax1, ax2):
+        ax.set_xticks(xticks)
+        ax.set_xlim(alt_min - span * 0.01, alt_max + span * 0.01)
+        ax.tick_params(axis="x", labelsize=9)
+
+    # 右侧: 每 5m 分段文字明细
+    ax4 = fig.add_axes([0.66, 0.06, 0.32, 0.86])
+    ax4.axis("off")
+    bin_size = metrics.get("alt_bin_size", 5.0)
+    lines = [f"高度分段明细 (每 {bin_size:.0f}m 统计)", "-" * 36]
+    for b in bins:
+        if b["count"] == 0:
+            lines.append(f"{b['label']}: 无数据")
+        else:
+            lines.append(f"{b['label']}: {b['rate']:.2f}% ({b['valid']}/{b['count']})"
+                         f"  平均延迟 {b['avg_lat']:.1f}ms")
+    lines.append("-" * 36)
+    lines.append(f"全局: {overall_rate:.2f}% ({metrics.get('valid_detections', 0)}/{metrics.get('total_frames', 0)})"
+                 f"  平均延迟 {metrics.get('avg_latency_ms', 0.0):.1f}ms")
+    ax4.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", fontsize=11.5, linespacing=1.7,
+             bbox=dict(boxstyle="round,pad=0.6", facecolor="#f5f5f0", edgecolor="#999999"))
+
+    if save_path:
+        try:
+            fig.savefig(save_path, dpi=130)
+            print(f"[Chart] 统计图已保存: {save_path}")
+        except Exception as e:
+            print(f"[Chart] 统计图保存失败: {e}")
+
+    if show:
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"[Chart] 图形窗口显示失败 ({e})，请直接查看保存的图片文件")
+    else:
+        plt.close(fig)
+
+
 class DetectorBenchmarkRunner:
-    def __init__(self, bag_path, image_topic, odom_topic, target_pose_topic, launch_node=True, rate=1.0, duration=None, preprocess_mode="none"):
+    def __init__(self, bag_path, image_topic, odom_topic, target_pose_topic, launch_node=True, rate=1.0, duration=None, preprocess_mode="none", tag_count_topic=None):
         self.bag_path = bag_path
         self.image_topic = image_topic
         self.odom_topic = odom_topic
         self.target_pose_topic = target_pose_topic
+        self.tag_count_topic = tag_count_topic or (target_pose_topic + "_tag_count")
         self.launch_node = launch_node
         self.playback_rate = rate
         self.duration = duration
@@ -212,6 +359,7 @@ class DetectorBenchmarkRunner:
         # 统计数据容器
         self.input_frames = []      # (seq, stamp_sec, alt)
         self.output_poses = []      # (stamp_sec, recv_sec, pos_x, pos_y, pos_z)
+        self.tag_counts = []        # (recv_sec, tag_count) 逐条 tag 计数消息
         self.current_alt = 0.0
         self.has_odom = False
         self.start_time = None
@@ -274,6 +422,12 @@ class DetectorBenchmarkRunner:
             "alt": self.current_alt
         })
 
+    def tag_count_callback(self, msg):
+        self.tag_counts.append({
+            "recv": rospy.Time.now().to_sec(),
+            "count": int(msg.data)
+        })
+
     def run_benchmark(self, label="Test"):
         print(f"\n=======================================================")
         print(f" 开始评测: {label}")
@@ -291,6 +445,8 @@ class DetectorBenchmarkRunner:
         # 订阅输出话题与里程计
         rospy.Subscriber(self.odom_topic, Odometry, self.odom_callback)
         rospy.Subscriber(self.target_pose_topic, PoseStamped, self.target_pose_callback)
+        rospy.Subscriber(self.tag_count_topic, Int32, self.tag_count_callback)
+        print(f"[Benchmark] 订阅 tag 计数话题: {self.tag_count_topic}")
 
         image_pub = rospy.Publisher(self.image_topic, Image, queue_size=10)
         odom_pub = rospy.Publisher(self.odom_topic, Odometry, queue_size=10)
@@ -397,6 +553,19 @@ class DetectorBenchmarkRunner:
         out_idx = 0
         num_out = len(self.output_poses)
 
+        # 将 tag 计数消息按接收时间就近对齐到输入帧 (阈值 0.2s)
+        tag_counts_sorted = sorted(self.tag_counts, key=lambda c: c["recv"])
+
+        def nearest_tag_count(t_pub):
+            best, best_dt = None, 999.0
+            for c in tag_counts_sorted:
+                dt = abs(c["recv"] - t_pub)
+                if dt < best_dt:
+                    best_dt, best = dt, c
+                if c["recv"] > t_pub + 0.5:
+                    break
+            return best["count"] if best is not None and best_dt <= 0.2 else None
+
         for in_f in self.input_frames:
             t_in = in_f["stamp"]
             alt = in_f["alt"]
@@ -418,6 +587,7 @@ class DetectorBenchmarkRunner:
                     "alt": alt,
                     "valid": True,
                     "latency_ms": lat_ms,
+                    "tag_count": nearest_tag_count(in_f["pub_time"]),
                     "x": best_match["x"],
                     "y": best_match["y"],
                     "z": best_match["z"]
@@ -429,14 +599,11 @@ class DetectorBenchmarkRunner:
                     "alt": alt,
                     "valid": False,
                     "latency_ms": None,
+                    "tag_count": nearest_tag_count(in_f["pub_time"]),
                     "x": None, "y": None, "z": None
                 })
 
-        # 高度分段统计 (高空 >8m, 中空 3~8m, 低空 <=3m)
-        high_alt_frames = [r for r in matched_results if r["alt"] > 8.0]
-        mid_alt_frames  = [r for r in matched_results if 3.0 < r["alt"] <= 8.0]
-        low_alt_frames  = [r for r in matched_results if r["alt"] <= 3.0]
-
+        # 总体统计
         def get_stat(frames):
             if not frames:
                 return {"count": 0, "valid": 0, "rate": 0.0, "avg_lat": 0.0}
@@ -446,10 +613,11 @@ class DetectorBenchmarkRunner:
             avg_lat = np.mean(lats) if lats else 0.0
             return {"count": len(frames), "valid": valid_c, "rate": rate, "avg_lat": avg_lat}
 
-        stat_high = get_stat(high_alt_frames)
-        stat_mid  = get_stat(mid_alt_frames)
-        stat_low  = get_stat(low_alt_frames)
         stat_all  = get_stat(matched_results)
+
+        # 高度分段统计: 每 5m 一个区间
+        alt_bin_size = 5.0
+        alt_bins = compute_altitude_bins(matched_results, alt_bin_size)
 
         # 连续丢靶/失锁分析 (连续连续未识别帧序列)
         lost_intervals = []
@@ -484,9 +652,12 @@ class DetectorBenchmarkRunner:
             "first_lock_alt": first_lock_alt,
             "first_lock_frame": first_lock_seq,
             "max_consecutive_lost_frames": max_consecutive_lost,
-            "stat_high": stat_high,
-            "stat_mid": stat_mid,
-            "stat_low": stat_low
+            "alt_bin_size": alt_bin_size,
+            "alt_bins_5m": alt_bins,
+            # 逐帧数据: 每条图像消息的识别结果 / tag 检出数量 / 飞行高度
+            "frame_valid": [1 if r["valid"] else 0 for r in matched_results],
+            "frame_tag_count": [r["tag_count"] if r["tag_count"] is not None else 0 for r in matched_results],
+            "frame_alt": [r["alt"] for r in matched_results]
         }
         return metrics
 
@@ -516,13 +687,25 @@ def print_comparison_table(res_before, res_after=None):
     row("【全局识别成功率】", f"{res_before['overall_rate_pct']:.2f} %", f"{res_after['overall_rate_pct']:.2f} %" if res_after else None)
 
     print("-" * len(header))
-    # 2. 高度分段识别率
-    row("高空段 (>8m) 识别率", f"{res_before['stat_high']['rate']:.2f} % ({res_before['stat_high']['valid']}/{res_before['stat_high']['count']})",
-        f"{res_after['stat_high']['rate']:.2f} % ({res_after['stat_high']['valid']}/{res_after['stat_high']['count']})" if res_after else None)
-    row("中空段 (3~8m) 识别率", f"{res_before['stat_mid']['rate']:.2f} % ({res_before['stat_mid']['valid']}/{res_before['stat_mid']['count']})",
-        f"{res_after['stat_mid']['rate']:.2f} % ({res_after['stat_mid']['valid']}/{res_after['stat_mid']['count']})" if res_after else None)
-    row("低空段 (<=3m) 识别率", f"{res_before['stat_low']['rate']:.2f} % ({res_before['stat_low']['valid']}/{res_before['stat_low']['count']})",
-        f"{res_after['stat_low']['rate']:.2f} % ({res_after['stat_low']['valid']}/{res_after['stat_low']['count']})" if res_after else None)
+    # 2. 高度分段识别率 (每 5m 一个区间)
+    bins_before = res_before["alt_bins_5m"]
+    bins_after = res_after["alt_bins_5m"] if res_after else []
+
+    def fmt_bin(bins, lo):
+        for x in bins:
+            if abs(x["lo"] - lo) < 0.01:
+                if x["count"] == 0:
+                    return "无数据"
+                return f"{x['rate']:.2f} % ({x['valid']}/{x['count']})"
+        return "无数据"
+
+    if not bins_before:
+        row("高度分段识别率", "无分段数据", "无分段数据" if res_after else None)
+    else:
+        for b in bins_before:
+            row(f"{b['lo']:.0f}~{b['hi']:.0f}m 识别率",
+                fmt_bin(bins_before, b["lo"]),
+                fmt_bin(bins_after, b["lo"]) if res_after else None)
 
     print("-" * len(header))
     # 3. 处理速度与延迟
@@ -547,6 +730,8 @@ def main():
                         help="Drone odometry topic in rosbag")
     parser.add_argument("--target_pose_topic", type=str, default="/pland/target_pose",
                         help="Target pose topic output by pland_detector_node")
+    parser.add_argument("--tag_count_topic", type=str, default=None,
+                        help="Per-frame detected tag count topic (default: <target_pose_topic>_tag_count)")
     parser.add_argument("--preprocess", type=str, default="coarse_to_fine",
                         choices=["coarse_to_fine", "c2f", "c2f_upscale", "coarse_to_fine_upscale", "none", "sharpen", "clahe", "adaptive", "upscale_bicubic", "upscale_sharpen", "upscale_clahe"],
                         help="External image enhancement mode before sending to C++ pland_detector_node (coarse_to_fine, c2f, c2f_upscale, coarse_to_fine_upscale, none, sharpen, clahe, adaptive, upscale_bicubic, upscale_sharpen, upscale_clahe)")
@@ -555,6 +740,8 @@ def main():
     parser.add_argument("--label", type=str, default=None, help="Label for this test run")
     parser.add_argument("--compare_with_json", type=str, default=None, help="Path to baseline json report to compare against")
     parser.add_argument("--save_json", type=str, default=None, help="Save evaluation metrics to json file")
+    parser.add_argument("--save_chart", type=str, default=None, help="识别率-高度统计图保存路径 (默认 altitude_rate_report.png, 或与 --save_json 同名)")
+    parser.add_argument("--no_show", action="store_true", help="不弹出统计图窗口，仅保存图片文件")
     parser.add_argument("--no_launch", action="store_true", help="Do not launch node (if node is already running externally)")
 
     args = parser.parse_args()
@@ -569,7 +756,8 @@ def main():
         launch_node=not args.no_launch,
         rate=args.rate,
         duration=args.duration,
-        preprocess_mode=args.preprocess
+        preprocess_mode=args.preprocess,
+        tag_count_topic=args.tag_count_topic
     )
 
     metrics = runner.run_benchmark(label=run_label)
@@ -586,6 +774,15 @@ def main():
         with open(args.save_json, "w") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
         print(f"[Benchmark] 评测数据已保存至: {args.save_json}")
+
+    # 弹出「识别率-高度」统计图窗口 (每 5m 分段)
+    if args.save_chart:
+        chart_path = args.save_chart
+    elif args.save_json:
+        chart_path = os.path.splitext(args.save_json)[0] + "_altitude_rate.png"
+    else:
+        chart_path = "altitude_rate_report.png"
+    show_altitude_rate_chart(metrics, save_path=chart_path, show=not args.no_show)
 
 
 if __name__ == "__main__":

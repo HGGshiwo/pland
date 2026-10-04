@@ -2,60 +2,9 @@
 #include <cmath>
 #include <exception>
 
-Eigen::Matrix3d PlandDetector::get_dynamic_camera_to_body_rotation(
-    const Eigen::Matrix3d &hist_R_wb, std::optional<double> gimbal_roll,
-    std::optional<double> gimbal_pitch, std::optional<double> gimbal_yaw,
-    bool is_gimbal_absolute) const {
-  // 默认相机朝下 (-90度)
-  double def_roll = 0.0;
-  double def_pitch = -M_PI_2;
-  double def_yaw = 0.0;
-
-  double g_roll = gimbal_roll.value_or(def_roll);
-  double g_yaw = gimbal_yaw.value_or(def_yaw);
-  double g_pitch;
-
-  if (is_gimbal_absolute) {
-    // 如果是绝对模式：输入的 gimbal_pitch 是相对大地的绝对下视角度
-    double abs_pitch = gimbal_pitch.value_or(def_pitch);
-
-    // 提取无人机当前的真实低头角度 (Nose Down)
-    // 原理：取出 FLU 坐标系 X 轴在 ENU 世界中的投影向量
-    Eigen::Vector3d forward_enu = hist_R_wb.col(0);
-    double drone_pitch_down = std::atan2(
-        -forward_enu.z(), std::sqrt(forward_enu.x() * forward_enu.x() +
-                                    forward_enu.y() * forward_enu.y()));
-
-    // 云台需要相对机身转动的角度 = 绝对目标角 + 飞机自身的低头角补偿
-    g_pitch = abs_pitch + drone_pitch_down;
-  } else {
-    g_pitch = gimbal_pitch.value_or(def_pitch);
-  }
-
-  // 云台电机旋转矩阵 (在 FRD 坐标系下 Z-Y-X 旋转)
-  Eigen::Matrix3d R_motor =
-      (Eigen::AngleAxisd(g_yaw, Eigen::Vector3d::UnitZ()) *
-       Eigen::AngleAxisd(g_pitch, Eigen::Vector3d::UnitY()) *
-       Eigen::AngleAxisd(g_roll, Eigen::Vector3d::UnitX()))
-          .toRotationMatrix();
-
-  // FRD 到 FLU 的静态转换
-  Eigen::Matrix3d R_frd_to_flu;
-  R_frd_to_flu << 1, 0, 0, 0, -1, 0, 0, 0, -1;
-
-  // 相机光学系 -> FRD系 -> FLU机身系
-  return R_frd_to_flu * R_motor * get_cam_to_frd_matrix();
-}
-
-PnpResultBody PlandDetector::solve_pose_by_pnp(
-    const TargetPose *safe_pose, const Eigen::Matrix3d &hist_R_wb,
-    std::optional<double> gimbal_roll, std::optional<double> gimbal_pitch,
-    std::optional<double> gimbal_yaw, bool is_gimbal_absolute) {
-  Eigen::Matrix3d R_bc = get_dynamic_camera_to_body_rotation(
-      hist_R_wb, gimbal_roll, gimbal_pitch, gimbal_yaw, is_gimbal_absolute);
-
-  Eigen::Vector3d t_bc = Eigen::Vector3d{offset_x_, offset_y_, offset_z_};
-
+PnpResultBody PlandDetector::solve_pose_by_pnp(const TargetPose *safe_pose,
+                                               const Eigen::Matrix3d &R_bc,
+                                               const Eigen::Vector3d &t_bc) {
   PnpResultBody res;
   res.pos_body = t_bc + R_bc * safe_pose->t;
   res.R_tag_body = R_bc * safe_pose->R;
@@ -119,6 +68,7 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
     ROS_ERROR("[PlandDetector] 'tag_config_file_path' is not specified in launch / parameters!");
   }
   pnh.param<std::string>("target_pose_topic", target_pose_topic_, "/pland/target_pose");
+  pnh.param<std::string>("target_err_enu_topic", target_err_enu_topic_, "/pland/target_err_enu");
   pnh.param<std::string>("target_vel_topic", target_vel_topic_, "/pland/target_vel");
   pnh.param<std::string>("debug_target_pose_topic", debug_target_pose_topic_, "/pland/target_pose_enu");
   pnh.param<std::string>("target_pixel_topic", target_pixel_topic_, "/pland/target_pixel");
@@ -142,16 +92,22 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
   kf_abs_yaw_ = std::make_shared<KalmanFilterYaw>();
   target_tracker_ = std::make_shared<TargetTracker>();
   pose_history_ = std::make_shared<PoseHistory>();
+  // 默认管理器: 固定云台垂直向下 90° (节点可注入 drone_config 配置的管理器覆盖)
+  gimbal_manager_ = std::make_unique<GimbalManager>(GimbalParams{});
   last_ekf_stamp_ = 0.0;
 
   target_pose_pub_ =
       nh_.advertise<geometry_msgs::PoseStamped>(target_pose_topic_, 10);
+  target_err_enu_pub_ =
+      nh_.advertise<geometry_msgs::PoseStamped>(target_err_enu_topic_, 10);
   target_vel_pub_ =
       nh_.advertise<geometry_msgs::TwistStamped>(target_vel_topic_, 10);
   debug_target_pose_pub_ =
       nh_.advertise<geometry_msgs::PoseStamped>(debug_target_pose_topic_, 10);
   target_pixel_pub_ =
       nh_.advertise<geometry_msgs::PointStamped>(target_pixel_topic_, 10);
+  tag_count_pub_ =
+      nh_.advertise<std_msgs::Int32>(target_pose_topic_ + "_tag_count", 10);
 
   // 加载tag配置文件
   if (!tag_config_file_path_.empty()) {
@@ -165,7 +121,6 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
 void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   // 动态参数：直接绑定变量，从 YAML/rosparam 读取，未提供则报错跳过
   sync.bind("velocity_deadzone", velocity_deadzone_);
-  sync.bind("gimbal_abs", gimbal_abs_);
   sync.bind("enable_c2f_enhancement", enable_c2f_enhancement_);
 }
 
@@ -297,6 +252,11 @@ void PlandDetector::detect(DetectorResult &output) {
     detections = tag_detector_->detect(gray);
   }
 
+  // 发布本帧原始检测到的 tag 数量 (无论是否形成有效目标，均供评测脚本逐帧统计)
+  std_msgs::Int32 tag_count_msg;
+  tag_count_msg.data = static_cast<int>(detections.size());
+  tag_count_pub_.publish(tag_count_msg);
+
   if (!current_pattern_)
     return;
 
@@ -321,26 +281,26 @@ void PlandDetector::detect(DetectorResult &output) {
   // 3. 如果视觉有效，进行姿态歧义消除与坐标系转换
   TargetPose *best_pose = &obs.pose1; // 默认相信 pose1
 
-  bool gimbal_abs = gimbal_abs_;
+  // 云台回读: 按图像时间戳插值 (超范围取最新值, 从未收到则为空 -> 固定云台默认角)
   std::optional<double> gimbal_roll, gimbal_pitch, gimbal_yaw;
-  if (!pose_history_ ||
-      !pose_history_->get_gimbal_at(stamp_tracker, gimbal_roll, gimbal_pitch,
-                                    gimbal_yaw)) {
-    gimbal_roll = gimbal_roll_;
-    gimbal_pitch = gimbal_pitch_;
-    gimbal_yaw = gimbal_yaw_;
+  if (pose_history_) {
+    pose_history_->get_gimbal_at(stamp_tracker, gimbal_roll, gimbal_pitch,
+                                 gimbal_yaw);
   }
+
+  // 传感头外参 (相机光学系 -> 机体系 FLU 的旋转与杆臂平移)
+  Eigen::Matrix3d R_bc = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d t_bc = Eigen::Vector3d::Zero();
+  gimbal_manager_->get_cam_extrinsic(R_bc, t_bc, hist_R_wb, gimbal_roll,
+                                     gimbal_pitch, gimbal_yaw);
 
   // --- 歧义消除逻辑 ---
   double time_since_last_valid = stamp_tracker - last_ekf_stamp_;
   bool is_prior_reliable = has_last_valid_pos_ && (time_since_last_valid < 0.5);
 
   if (obs.pose2.valid && is_prior_reliable) {
-    Eigen::Matrix3d R_bc_dynamic = get_dynamic_camera_to_body_rotation(
-        hist_R_wb, gimbal_roll, gimbal_pitch, gimbal_yaw, gimbal_abs);
-
     auto get_yaw_from_pose = [&](const TargetPose &p) {
-      Eigen::Matrix3d R_tag_world = hist_R_wb * (R_bc_dynamic * p.R);
+      Eigen::Matrix3d R_tag_world = hist_R_wb * (R_bc * p.R);
       return std::atan2(R_tag_world(1, 0), R_tag_world(0, 0));
     };
 
@@ -361,8 +321,7 @@ void PlandDetector::detect(DetectorResult &output) {
   }
 
   // --- 纯 PnP 几何解算 (直接输出机身体系 FLU) ---
-  PnpResultBody pnp_body = solve_pose_by_pnp(
-      best_pose, hist_R_wb, gimbal_roll, gimbal_pitch, gimbal_yaw, gimbal_abs);
+  PnpResultBody pnp_body = solve_pose_by_pnp(best_pose, R_bc, t_bc);
 
   if (std::isnan(pnp_body.pos_body.x()) || std::isnan(pnp_body.pos_body.y()) ||
       std::isnan(pnp_body.pos_body.z())) {
@@ -372,6 +331,8 @@ void PlandDetector::detect(DetectorResult &output) {
   // 1. 控制器核心数据：纯净机体系 FLU 下的几何测量值 (零累积误差、零转换时延)
   output.target_pos_body_raw = pnp_body.pos_body;
   output.target_pos_body = pnp_body.pos_body;
+  // 仅旋转: 机体误差矢量 -> ENU 方向轴 (图像时刻姿态, 不加平移)
+  output.target_err_enu = hist_R_wb * pnp_body.pos_body;
   output.target_yaw_body = pnp_body.yaw_body;
   output.is_valid = true;
 
@@ -478,20 +439,18 @@ void PlandDetector::update_quat(double t, Eigen::Quaterniond quat) {
 void PlandDetector::update_gimbal(double t, std::optional<double> r,
                                   std::optional<double> p,
                                   std::optional<double> y) {
+  // 仅入历史缓存, 由 detect() 按图像时间戳插值查询
+  if (!pose_history_) {
+    return;
+  }
   if (r.has_value()) {
-    gimbal_roll_ = r;
-    if (pose_history_)
-      pose_history_->push_gimbal_roll(t, r.value());
+    pose_history_->push_gimbal_roll(t, r.value());
   }
   if (p.has_value()) {
-    gimbal_pitch_ = p;
-    if (pose_history_)
-      pose_history_->push_gimbal_pitch(t, p.value());
+    pose_history_->push_gimbal_pitch(t, p.value());
   }
   if (y.has_value()) {
-    gimbal_yaw_ = y;
-    if (pose_history_)
-      pose_history_->push_gimbal_yaw(t, y.value());
+    pose_history_->push_gimbal_yaw(t, y.value());
   }
 }
 
@@ -527,6 +486,17 @@ void PlandDetector::publish_target(const DetectorResult &result) {
   pose_msg.pose.orientation.y = q.y();
   pose_msg.pose.orientation.z = q.z();
   target_pose_pub_.publish(pose_msg);
+
+  // 1.1 控制核心话题：机体误差矢量仅旋转到 ENU 方向轴 (只旋转不平移)
+  // position = R_wb(图像时刻)·pos_body, 原点无意义; orientation 沿用目标相对偏航, 供偏航对齐通道
+  geometry_msgs::PoseStamped err_enu_msg;
+  err_enu_msg.header.stamp = stamp;
+  err_enu_msg.header.frame_id = "map";
+  err_enu_msg.pose.position.x = result.target_err_enu.x();
+  err_enu_msg.pose.position.y = result.target_err_enu.y();
+  err_enu_msg.pose.position.z = result.target_err_enu.z();
+  err_enu_msg.pose.orientation = pose_msg.pose.orientation;
+  target_err_enu_pub_.publish(err_enu_msg);
 
   // 2. 调试用话题：发布目标在 map (ENU) 坐标系下的绝对位姿，供 RViz / 地面站全局可视化调试展示
   if (debug_target_pose_pub_.getNumSubscribers() > 0) {

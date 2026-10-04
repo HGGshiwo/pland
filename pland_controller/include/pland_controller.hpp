@@ -87,6 +87,8 @@ private:
   std::string command_service_ = "/mavros/cmd/command";
   std::string set_mode_service_ = "/mavros/set_mode";
   std::string gps_topic_ = "/mavros/global_position/global";
+  // 指令交付坐标系: "enu" = FRAME_LOCAL_NED 直发 (方案⑤), "body" = 转回机体系 FRAME_BODY_NED (方案④)
+  std::string command_frame_ = "enu";
 
   ros::NodeHandle nh_;
   ros::Publisher cmd_vel_pub_;
@@ -120,7 +122,7 @@ private:
   double inject_target_stamp_ = 0.0;
 
   // 视觉检测目标
-  Eigen::Vector3d detector_target_pos_body_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d detector_err_enu_ = Eigen::Vector3d::Zero(); // 误差矢量, ENU 方向轴 (detector 图像时刻旋转)
   Eigen::Vector3d detector_target_vel_enu_ = Eigen::Vector3d::Zero(); // z 分量为 yaw_rate
   double detector_target_yaw_body_ = 0.0;
   double detector_target_stamp_ = 0.0;
@@ -178,11 +180,12 @@ private:
   bool inject_target_valid() const;
   bool detector_target_valid() const;
 
-  Eigen::Vector3d get_ff_vel_body() const;
-  Eigen::Vector2d get_drone_vel_body_xy() const;
+  Eigen::Vector3d get_ff_vel_enu() const;
+  Eigen::Vector2d get_drone_vel_enu_xy() const;
   Eigen::Vector4d get_tracing_detector_target_vel();
 
   void cmd_vel(const Eigen::Vector4d &vel_body);
+  void cmd_vel_enu(const Eigen::Vector4d &vel_enu);
   void fly_to(const Eigen::Vector3d &pos_enu, const Eigen::Vector3d &vel_enu);
   void trigger_land();
   void trigger_disarm();
@@ -208,15 +211,16 @@ public:
   void step();
 
   // 状态与观测数据更新接口
+  // vel_body: /mavros/local_position/odom 的 twist (机体系 FLU, ArduPilot 与真机 mavros 一致)
   void update_drone_state(double stamp, const Eigen::Vector3d &pos_enu,
                           const Eigen::Quaterniond &orientation,
-                          const Eigen::Vector3d &vel_enu);
+                          const Eigen::Vector3d &vel_body);
   void update_drone_gps(double stamp, const Eigen::Vector3d &drone_lat_lon_alt);
   void update_rangefinder(double stamp, double range, bool is_valid);
   void update_rel_alt(double stamp, double rel_alt);
 
   void update_detector_target(double stamp,
-                              const Eigen::Vector3d &target_pos_body,
+                              const Eigen::Vector3d &target_err_enu,
                               const Eigen::Vector3d &target_vel_enu,
                               double target_yaw_body);
 

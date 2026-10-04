@@ -7,6 +7,7 @@
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/image_encodings.h>
+#include <sensor_msgs/Range.h>
 #include <cv_bridge/cv_bridge.h>
 #include <std_msgs/Float64.h>
 #include <std_msgs/Empty.h>
@@ -27,9 +28,6 @@ public:
     std::string detect_topic;
     std::string reset_topic;
     std::string state_topic;
-    std::string gimbal_roll_topic;
-    std::string gimbal_pitch_topic;
-    std::string gimbal_yaw_topic;
     std::string param_config_path;
     std::string drone_config_path;
 
@@ -42,28 +40,26 @@ public:
     pnh_.param<std::string>("param_config_path", param_config_path, "");
     pnh_.param<std::string>("drone_config_path", drone_config_path, "");
 
-    pnh_.param<std::string>("gimbal_roll_topic", gimbal_roll_topic, "/gimbal/roll");
-    pnh_.param<std::string>("gimbal_pitch_topic", gimbal_pitch_topic, "/gimbal/current_pitch");
-    pnh_.param<std::string>("gimbal_yaw_topic", gimbal_yaw_topic, "/gimbal/yaw");
+    // 融合高度数据源 (默认话题与 pland_controller 一致)
+    std::string rangefinder_topic;
+    std::string rel_alt_topic;
+    pnh_.param<std::string>("rangefinder_topic", rangefinder_topic,
+                            "/mavros/distance_sensor/rangefinder_pub");
+    pnh_.param<std::string>("rel_alt_topic", rel_alt_topic,
+                            "/mavros/global_position/rel_alt");
 
     // 2. 初始化核心检测器
     detector_ = std::make_unique<PlandDetector>(nh_, pnh_);
 
-    // 3. 加载硬件/机架静态配置文件 (drone_config.yaml: 相机外参偏移等)
+    // 3. 加载硬件/机架静态配置文件 (drone_config.yaml: 相机外参偏移 + 云台配置)
+    GimbalParams gimbal_params;
     if (!drone_config_path.empty()) {
-      try {
-        YAML::Node config = YAML::LoadFile(drone_config_path);
-        double ox = config["offset_x"] ? config["offset_x"].as<double>() : 0.0;
-        double oy = config["offset_y"] ? config["offset_y"].as<double>() : 0.0;
-        double oz = config["offset_z"] ? config["offset_z"].as<double>() : 0.0;
-        detector_->set_camera_offset(ox, oy, oz);
-        ROS_INFO("[PlandDetectorNode] Loaded camera offset from drone_config: [%.3f, %.3f, %.3f] m",
-                 ox, oy, oz);
-      } catch (const std::exception &e) {
-        ROS_WARN("[PlandDetectorNode] Failed to load drone_config at %s: %s",
-                 drone_config_path.c_str(), e.what());
-      }
+      load_drone_config(drone_config_path, gimbal_params);
+    } else {
+      ROS_WARN("[PlandDetectorNode] drone_config_path not set. Using fixed "
+               "nadir gimbal without readback.");
     }
+    detector_->set_gimbal_manager(std::make_unique<GimbalManager>(gimbal_params));
 
     // 4. 初始化动态参数同步器 (仅动态参数进行绑定与持久化)
     if (!param_config_path.empty()) {
@@ -99,13 +95,25 @@ public:
     // 5. 订阅 MAVROS 里程计 (位置、四元数、机体系角速度)
     sub_odom_ = nh_.subscribe(odom_topic, 10, &PlandDetectorNode::odomCallback, this);
 
-    // 6. 订阅云台数据
-    sub_gimbal_roll_ = nh_.subscribe(gimbal_roll_topic, 10,
-                                     &PlandDetectorNode::gimbalRollCallback, this);
-    sub_gimbal_pitch_ = nh_.subscribe(gimbal_pitch_topic, 10,
-                                      &PlandDetectorNode::gimbalPitchCallback, this);
-    sub_gimbal_yaw_ = nh_.subscribe(gimbal_yaw_topic, 10,
-                                    &PlandDetectorNode::gimbalYawCallback, this);
+    // 5.1 订阅测距仪与相对高度 (用于低空融合高度 get_current_z)
+    sub_rangefinder_ = nh_.subscribe(
+        rangefinder_topic, 10, &PlandDetectorNode::rangefinderCallback, this);
+    sub_rel_alt_ = nh_.subscribe(
+        rel_alt_topic, 10, &PlandDetectorNode::relAltCallback, this);
+
+    // 6. 订阅云台回读 (话题为空 = 该轴无回读, 使用固定云台默认角)
+    if (!gimbal_params.roll.topic.empty()) {
+      sub_gimbal_roll_ = nh_.subscribe(gimbal_params.roll.topic, 10,
+                                       &PlandDetectorNode::gimbalRollCallback, this);
+    }
+    if (!gimbal_params.pitch.topic.empty()) {
+      sub_gimbal_pitch_ = nh_.subscribe(gimbal_params.pitch.topic, 10,
+                                        &PlandDetectorNode::gimbalPitchCallback, this);
+    }
+    if (!gimbal_params.yaw.topic.empty()) {
+      sub_gimbal_yaw_ = nh_.subscribe(gimbal_params.yaw.topic, 10,
+                                      &PlandDetectorNode::gimbalYawCallback, this);
+    }
 
     // 7. 订阅图像输入
     sub_image_ = nh_.subscribe(image_topic, 1, &PlandDetectorNode::imageCallback, this);
@@ -120,13 +128,64 @@ public:
     ROS_INFO("[PlandDetectorNode] Subscribing to odom: %s", odom_topic.c_str());
     ROS_INFO("[PlandDetectorNode] Subscribing to image: %s", image_topic.c_str());
     ROS_INFO("[PlandDetectorNode] Subscribing to reset: %s", reset_topic.c_str());
-    ROS_INFO("[PlandDetectorNode] Subscribing to gimbal: roll=%s, pitch=%s, yaw=%s",
-             gimbal_roll_topic.c_str(), gimbal_pitch_topic.c_str(), gimbal_yaw_topic.c_str());
+    ROS_INFO("[PlandDetectorNode] Subscribing to gimbal: roll='%s', pitch='%s', yaw='%s'",
+             gimbal_params.roll.topic.c_str(), gimbal_params.pitch.topic.c_str(),
+             gimbal_params.yaw.topic.c_str());
     ROS_INFO("[PlandDetectorNode] Initial detection status: %s",
              detection_enabled_ ? "ENABLED" : "DISABLED");
   }
 
 private:
+  // 解析 drone_config.yaml: 相机安装外参 camera_offset_* 与云台每轴
+  // gimbal_<axis>_topic / gimbal_<axis>_frame, 统一填入 GimbalParams.
+  // 文件缺失或单键缺失时保留默认值 (空话题 = 无回读, frame = body)
+  void load_drone_config(const std::string &path, GimbalParams &params) {
+    try {
+      YAML::Node config = YAML::LoadFile(path);
+
+      params.camera_offset = Eigen::Vector3d(
+          config["camera_offset_x"] ? config["camera_offset_x"].as<double>() : 0.0,
+          config["camera_offset_y"] ? config["camera_offset_y"].as<double>() : 0.0,
+          config["camera_offset_z"] ? config["camera_offset_z"].as<double>() : 0.0);
+      ROS_INFO("[PlandDetectorNode] Loaded camera offset from drone_config: "
+               "[%.3f, %.3f, %.3f] m",
+               params.camera_offset.x(), params.camera_offset.y(),
+               params.camera_offset.z());
+
+      auto read_axis = [&](GimbalAxisParams &axis, const std::string &name) {
+        const std::string prefix = "gimbal_" + name;
+        if (config[prefix + "_topic"]) {
+          axis.topic = config[prefix + "_topic"].as<std::string>();
+        }
+        if (config[prefix + "_frame"]) {
+          const std::string frame = config[prefix + "_frame"].as<std::string>();
+          if (frame == "ground") {
+            axis.frame = GimbalAngleFrame::kGround;
+          } else if (frame != "body") {
+            ROS_WARN("[PlandDetectorNode] Unknown %s_frame '%s', fallback to 'body'.",
+                     prefix.c_str(), frame.c_str());
+          }
+        }
+        ROS_INFO("[PlandDetectorNode] Gimbal %s: topic='%s', frame=%s",
+                 name.c_str(), axis.topic.c_str(),
+                 axis.frame == GimbalAngleFrame::kGround ? "ground" : "body");
+      };
+      read_axis(params.roll, "roll");
+      read_axis(params.pitch, "pitch");
+      read_axis(params.yaw, "yaw");
+
+      // 机架高度 (起落架底端到测距仪安装面), 用于低空融合高度补偿
+      if (config["frame_height"]) {
+        double fh = config["frame_height"].as<double>();
+        detector_->set_frame_height(fh);
+        ROS_INFO("[PlandDetectorNode] Loaded frame_height from drone_config: %.2f m", fh);
+      }
+    } catch (const std::exception &e) {
+      ROS_WARN("[PlandDetectorNode] Failed to load drone_config at %s: %s",
+               path.c_str(), e.what());
+    }
+  }
+
   void odomCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     double t = msg->header.stamp.toSec();
     if (t <= 0.0) {
@@ -147,6 +206,23 @@ private:
     detector_->update_pose(t, pos);
     detector_->update_quat(t, quat);
     detector_->update_angular_rate(vel_ang);
+  }
+
+  void rangefinderCallback(const sensor_msgs::Range::ConstPtr &msg) {
+    double t = msg->header.stamp.toSec();
+    if (t <= 0.0) {
+      t = ros::Time::now().toSec();
+    }
+    bool is_valid = (!std::isnan(msg->range) && !std::isinf(msg->range) &&
+                     msg->range >= msg->min_range && msg->range <= msg->max_range);
+    detector_->update_rangefinder(t, msg->range, is_valid);
+  }
+
+  void relAltCallback(const std_msgs::Float64::ConstPtr &msg) {
+    double t = ros::Time::now().toSec();
+    if (!std::isnan(msg->data) && !std::isinf(msg->data)) {
+      detector_->update_rel_alt(t, msg->data);
+    }
   }
 
   void gimbalRollCallback(const std_msgs::Float64::ConstPtr &msg) {
@@ -315,6 +391,8 @@ private:
   ros_param_sync::ParamSync sync_;
 
   ros::Subscriber sub_odom_;
+  ros::Subscriber sub_rangefinder_;
+  ros::Subscriber sub_rel_alt_;
   ros::Subscriber sub_image_;
   ros::Subscriber sub_gimbal_roll_;
   ros::Subscriber sub_gimbal_pitch_;

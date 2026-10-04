@@ -1,3 +1,4 @@
+command_frame: enu  # 指令交付坐标系: enu=FRAME_LOCAL_NED 直发(方案⑤) / body=转回机体系(方案④)
 touchdown_velocity: 0.4
 touchdown_z_thresh: 0.3
 lost_target_alt: 8

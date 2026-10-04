@@ -37,6 +37,7 @@ public:
    * @param max_acc_z 垂直最大加速度 (m/s^2)
    * @param max_jerk_z 垂直最大加加速度 (m/s^3)
    * @param max_acc_yaw 偏航最大角加速度 (rad/s^2)
+   * @param world_frame 指令合成所在坐标系: true = ENU 世界系 (存储状态无需随机头旋转), false = 机体系 (默认, 兼容旧路径)
    * @return 经过机体坐标系重投影与加速度/Jerk平滑后的速度指令
    */
   Eigen::Vector4d apply_constraints(Eigen::Vector4d raw_cmd,
@@ -50,7 +51,8 @@ public:
                                     double max_jerk_xy = 1000.0,
                                     double max_acc_z = 2.0,
                                     double max_jerk_z = 1000.0,
-                                    double max_acc_yaw = 3.0) {
+                                    double max_acc_yaw = 3.0,
+                                    bool world_frame = false) {
     if (!initialized_) {
       reset(raw_cmd, current_yaw);
       return raw_cmd;
@@ -69,20 +71,23 @@ public:
     raw_cmd.w() = std::clamp(raw_cmd.w(), -limit_v_yaw, limit_v_yaw);
 
     // 2. 坐标系旋转处理：当机体发生偏航时，上一拍的速度和加速度必须旋转到新机体系下
+    // world_frame=true 时指令合成在 ENU 世界系, 帧本身不随机头旋转, 跳过重投影
     double delta_yaw = current_yaw - last_yaw_;
-    double cy = std::cos(delta_yaw);
-    double sy = std::sin(delta_yaw);
+    if (!world_frame && std::abs(delta_yaw) > 1e-12) {
+      double cy = std::cos(delta_yaw);
+      double sy = std::sin(delta_yaw);
 
-    double rotated_last_vx =  last_cmd_vel_.x() * cy + last_cmd_vel_.y() * sy;
-    double rotated_last_vy = -last_cmd_vel_.x() * sy + last_cmd_vel_.y() * cy;
+      double rotated_last_vx =  last_cmd_vel_.x() * cy + last_cmd_vel_.y() * sy;
+      double rotated_last_vy = -last_cmd_vel_.x() * sy + last_cmd_vel_.y() * cy;
 
-    double rotated_last_ax =  last_cmd_acc_.x() * cy + last_cmd_acc_.y() * sy;
-    double rotated_last_ay = -last_cmd_acc_.x() * sy + last_cmd_acc_.y() * cy;
+      double rotated_last_ax =  last_cmd_acc_.x() * cy + last_cmd_acc_.y() * sy;
+      double rotated_last_ay = -last_cmd_acc_.x() * sy + last_cmd_acc_.y() * cy;
 
-    last_cmd_vel_.x() = rotated_last_vx;
-    last_cmd_vel_.y() = rotated_last_vy;
-    last_cmd_acc_.x() = rotated_last_ax;
-    last_cmd_acc_.y() = rotated_last_ay;
+      last_cmd_vel_.x() = rotated_last_vx;
+      last_cmd_vel_.y() = rotated_last_vy;
+      last_cmd_acc_.x() = rotated_last_ax;
+      last_cmd_acc_.y() = rotated_last_ay;
+    }
     last_yaw_ = current_yaw;
 
     // ---------------------------------------------------------------------

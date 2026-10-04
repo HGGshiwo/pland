@@ -128,7 +128,9 @@ rostopic echo /pland/state
 | `enable_c2f_enhancement` | `true` | bool | 开启自适应多尺度图像增强（高空 C2F 超分 + 低空全图 CLAHE） |
 | `velocity_deadzone` | `0.2` | double (m/s) | 目标速度滤波死区，低于该值视目标为静止 |
 | `publish_debug_image` | `true` | bool | 是否发布绘制了角点与位姿信息的调试图像 |
-| `gimbal_abs` | `false` | bool | 云台固定角模式（true: 垂直地面绝对角; false: 相对机体角） |
+| `gimbal_in_degrees` | `true` | bool | 云台回读角度单位是否为度（度自动转弧度） |
+
+云台按轴独立配置于 `drone_config.yaml`（静态硬件文件）：每轴 `gimbal_*_topic`（数据来源话题，留空 = 无回读）与 `gimbal_*_frame`（`ground` 相对大地绝对角 / `body` 相对机体角）；相机光心杆臂配置 `camera_offset_x/y/z`。无回读时兜底为固定云台垂直向下 90°。
 
 ### 2. `pland_controller` 配置 (`pland_controller.yaml`)
 | 参数项 | 默认值 | 单位 | 说明 |

@@ -11,8 +11,31 @@
 # - 实机部署：根据实际起落架与传感器安装高差填写（若传感器已在飞控中完成零点校准则为 0.0）
 frame_height: 0.0
 
-# 相机物理安装外参偏移 (m，机体系 FLU 坐标系)
-# 相机光学中心相对于机身中心的物理位移
-offset_x: 0.0
-offset_y: 0.0
-offset_z: 0.0
+# -------------------------------------------------------
+# 相机安装外参 (pland_detector 消费)
+# 相机光学中心相对 base_link 原点的位移 (m, 机体系 FLU, 云台中位姿态下量取)
+# -------------------------------------------------------
+camera_offset_x: 0.0
+camera_offset_y: 0.0
+camera_offset_z: 0.0
+
+# -------------------------------------------------------
+# 云台配置 (pland_detector 消费)
+# 每轴独立配置数据来源话题与参考系；话题留空 "" = 该轴无回读
+#   frame: ground = 相对大地/水平面的绝对角 (DJI 等自稳云台)
+#          body   = 相对机体 (固定挂载/模拟云台)
+# 无回读兜底：固定云台垂直向下 90°（roll 0 / pitch -90° / yaw 0，相对机体）
+# -------------------------------------------------------
+gimbal_roll_topic: /gimbal/roll
+gimbal_roll_frame: ground
+gimbal_pitch_topic: /gimbal/current_pitch
+gimbal_pitch_frame: ground
+gimbal_yaw_topic: /gimbal/yaw
+gimbal_yaw_frame: ground
+
+# 常见机型预设：
+# 1) DJI 自稳云台 (绝对角回读)：如上，三轴 frame 全部 ground
+# 2) 固定挂载相机 (无云台)：三个 topic 全部留空 ""，三轴 frame 保持 body
+# 3) 仿真 ros_gimbal_small_2d：仅 pitch 有回读且相对机体——
+#    gimbal_pitch_topic: /gimbal/current_pitch, gimbal_pitch_frame: body，
+#    其余两个 topic 留空 ""

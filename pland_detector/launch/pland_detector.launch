@@ -15,11 +15,8 @@
     <arg name="reset_topic" default="/pland/reset" />
     <!-- 控制器状态机状态话题 (std_msgs/String, 用于调试图像 OSD 显示) -->
     <arg name="state_topic" default="/pland/state" />
-
-    <!-- 云台话题 -->
-    <arg name="gimbal_roll_topic" default="/gimbal/roll" />
-    <arg name="gimbal_pitch_topic" default="/gimbal/current_pitch" />
-    <arg name="gimbal_yaw_topic" default="/gimbal/yaw" />
+    <arg name="camera_inner_matrix" default="[554.38271282264407, 0.0, 320.5, 0.0, 554.38271282264407, 240.5, 0.0, 0.0, 1.0]" />
+    
 
     <!-- AprilTag 与图案配置 (用于底层对象构造) -->
     <arg name="tag_family" default="tag36h11" />
@@ -44,10 +41,6 @@
         <param name="reset_topic" value="$(arg reset_topic)" />
         <param name="state_topic" value="$(arg state_topic)" />
 
-        <param name="gimbal_roll_topic" value="$(arg gimbal_roll_topic)" />
-        <param name="gimbal_pitch_topic" value="$(arg gimbal_pitch_topic)" />
-        <param name="gimbal_yaw_topic" value="$(arg gimbal_yaw_topic)" />
-
         <param name="tag_family" value="$(arg tag_family)" />
         <param name="tag_config_file_path" value="$(arg tag_config_file_path)" />
 
@@ -57,6 +50,6 @@
         <param name="drone_config_path" value="$(arg drone_config_path)" />
 
         <!-- 相机内参: [fx, 0, cx, 0, fy, cy, 0, 0, 1] -->
-        <rosparam param="camera_inner_matrix">[554.38271282264407, 0.0, 320.5, 0.0, 554.38271282264407, 240.5, 0.0, 0.0, 1.0]</rosparam>
+        <param name="camera_inner_matrix" value="$(arg camera_inner_matrix)" type="yaml"  />
     </node>
 </launch>

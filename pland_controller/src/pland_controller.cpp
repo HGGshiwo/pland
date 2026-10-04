@@ -17,6 +17,13 @@ void PlandController::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
   // 1. 读取仅用于构造与通信连接的静态配置 (直接在 launch 中指定)
   pnh.param<std::string>("gps_topic", gps_topic_,
                          "/mavros/global_position/global");
+  // 指令交付坐标系: "enu"=FRAME_LOCAL_NED 直发(默认), "body"=转回机体系 FRAME_BODY_NED
+  pnh.param<std::string>("command_frame", command_frame_, "enu");
+  if (command_frame_ != "enu" && command_frame_ != "body") {
+    ROS_WARN("[PlandController] invalid command_frame '%s', fallback to 'enu'",
+             command_frame_.c_str());
+    command_frame_ = "enu";
+  }
   pnh.param<std::string>("target_pose_topic", target_pose_topic_,
                          "/pland/target_pose");
   pnh.param<std::string>("target_vel_topic", target_vel_topic_,
@@ -167,36 +174,31 @@ bool PlandController::detector_target_valid() const {
   return (ros::Time::now().toSec() - detector_target_stamp_) < target_timeout_;
 }
 
-Eigen::Vector3d PlandController::get_ff_vel_body() const {
+Eigen::Vector3d PlandController::get_ff_vel_enu() const {
   if (!use_ff_vel_) {
     return Eigen::Vector3d::Zero();
   }
 
-  double current_yaw = yaw_enu_;
-  Eigen::Vector3d target_vel = detector_target_vel_enu_;
-
-  // 旋转矩阵：将 ENU 速度投影到当前的机体前方 (X) 和左方/右方 (Y) (Body FLU 系)
-  double cos_y = std::cos(current_yaw);
-  double sin_y = std::sin(current_yaw);
-
-  Eigen::Vector3d ff_vel_body = Eigen::Vector3d::Zero();
-  ff_vel_body.x() = target_vel.x() * cos_y + target_vel.y() * sin_y;
-  ff_vel_body.y() = -target_vel.x() * sin_y + target_vel.y() * cos_y;
-
-  if (max_ff_vel_ > 0.0 && ff_vel_body.norm() > max_ff_vel_) {
-    ff_vel_body = ff_vel_body.normalized() * max_ff_vel_;
+  // detector 的目标速度本就是 ENU, 直接限幅返回 (无需机体系投影)
+  Eigen::Vector3d ff_vel_enu = detector_target_vel_enu_;
+  if (max_ff_vel_ > 0.0 && ff_vel_enu.norm() > max_ff_vel_) {
+    ff_vel_enu = ff_vel_enu.normalized() * max_ff_vel_;
   }
-  return ff_vel_body;
+  return ff_vel_enu;
 }
 
-Eigen::Vector2d PlandController::get_drone_vel_body_xy() const {
-  // 注意：MAVROS /mavros/local_position/odom 中的 twist.twist 自身 child_frame_id 已经是 base_link (机体系 FLU)
-  // 切不可再乘以 R(-yaw) 旋转矩阵，否则会导致坐标系二次旋转引起正反馈振荡！
+Eigen::Vector2d PlandController::get_drone_vel_enu_xy() const {
+  // vel_enu_ 已在 update_drone_state 中由机体系 twist 经全姿态旋转得到:
+  // vel_enu_ = orientation_ * vel_body (ArduPilot 与真机 mavros 的 odom twist 均为机体系)
   return vel_enu_.head<2>();
 }
 
 Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
-  Eigen::Vector3d err_body = detector_target_pos_body_;
+  // 水平环全程在 ENU 世界系合成:
+  // 误差 e_enu 由 detector 在图像时刻锚定 (仅旋转, 不随机头漂移);
+  // 阻尼速度 v_enu 由机体系 twist 经全姿态旋转得到 (update_drone_state);
+  // 前馈本就是 ENU (detector EKF)。合成结果按 command_frame 交付 (LOCAL_NED 或转回 body)。
+  Eigen::Vector2d err_enu = detector_err_enu_.head<2>();
   double err_yaw = detector_target_yaw_body_;
   double ff_omega = detector_target_vel_enu_.z(); // 目标偏航角速度前馈
   double current_z = get_current_z();
@@ -208,25 +210,25 @@ Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
     ff_omega = 0.0;
   }
 
-  auto ff_vel_body = get_ff_vel_body();
+  Eigen::Vector2d ff_vel_enu = get_ff_vel_enu().head<2>();
 
   // 2. 偏航-平移解耦控制 (位置优先，防止远距离大旋转产生离心画圈)
-  double xy_error_norm = err_body.head<2>().norm();
-  
-  // 水平速度指令 (加入纯视觉相对速度阻尼项 Kd_xy，消除左右晃动与超调)
+  double xy_error_norm = err_enu.norm();
+
+  // 水平速度指令 (加入相对速度阻尼项 Kd_xy，消除左右晃动与超调)
   double Kp_xy = vision_kp_;
   double Kd_xy = vision_kd_;
   double max_v_xy = max_speed_xy_;
 
-  Eigen::Vector2d v_drone_body_xy = get_drone_vel_body_xy();
-  Eigen::Vector2d v_rel_xy = v_drone_body_xy - ff_vel_body.head<2>();
+  Eigen::Vector2d v_drone_enu_xy = get_drone_vel_enu_xy();
+  Eigen::Vector2d v_rel_xy = v_drone_enu_xy - ff_vel_enu;
 
-  Eigen::Vector2d fb_vel_xy = Kp_xy * err_body.head<2>() - Kd_xy * v_rel_xy;
-  if (max_v_xy > 0.0 && fb_vel_xy.norm() > max_v_xy) {
-    fb_vel_xy = fb_vel_xy.normalized() * max_v_xy;
+  Eigen::Vector2d fb_vel_enu = Kp_xy * err_enu - Kd_xy * v_rel_xy;
+  if (max_v_xy > 0.0 && fb_vel_enu.norm() > max_v_xy) {
+    fb_vel_enu = fb_vel_enu.normalized() * max_v_xy;
   }
 
-  Eigen::Vector2d vel_xy = fb_vel_xy + ff_vel_body.head<2>();
+  Eigen::Vector2d vel_xy_enu = fb_vel_enu + ff_vel_enu;
 
   // 3. 偏航角速度指令：平滑自适应位置解耦 (远距离全力平移对中，正上方全额对齐机头)
   double yaw_weight = 1.0;
@@ -299,10 +301,10 @@ Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
   }
 
   Eigen::Vector4d vel_cmd;
-  vel_cmd.x() = vel_xy.x();
-  vel_cmd.y() = vel_xy.y();
-  vel_cmd.z() = -descent_vel; // FLU 下负向为下降
-  vel_cmd.w() = omega_z;      // 偏航角速度
+  vel_cmd.x() = vel_xy_enu.x();
+  vel_cmd.y() = vel_xy_enu.y();
+  vel_cmd.z() = -descent_vel; // FLU/ENU 下负向为下降
+  vel_cmd.w() = omega_z;      // 偏航角速度 (系不变)
   return vel_cmd;
 }
 
@@ -338,6 +340,40 @@ void PlandController::cmd_vel(const Eigen::Vector4d &vel_body) {
     twist.twist.linear.y = vel_body.y();
     twist.twist.linear.z = vel_body.z();
     twist.twist.angular.z = vel_body.w();
+    cmd_vel_pub_.publish(twist);
+  }
+}
+
+// ENU 世界系速度指令直接以 FRAME_LOCAL_NED 交付 (方案⑤)
+// MAVROS 与 dankong 桥对 FRAME_LOCAL_NED 均约定 ROS 侧输入 ENU, 由其完成 ENU->NED 转换
+void PlandController::cmd_vel_enu(const Eigen::Vector4d &vel_enu) {
+  mavros_msgs::PositionTarget cmd;
+  cmd.header.stamp = ros::Time::now();
+  cmd.header.frame_id = "map";
+  cmd.coordinate_frame = mavros_msgs::PositionTarget::FRAME_LOCAL_NED;
+  cmd.velocity.x = vel_enu.x();   // East
+  cmd.velocity.y = vel_enu.y();   // North
+  cmd.velocity.z = vel_enu.z();   // Up (下降为负)
+  cmd.yaw_rate = vel_enu.w();     // 偏航角速度 (系不变)
+
+  cmd.type_mask = mavros_msgs::PositionTarget::IGNORE_AFX |
+                  mavros_msgs::PositionTarget::IGNORE_AFY |
+                  mavros_msgs::PositionTarget::IGNORE_AFZ |
+                  mavros_msgs::PositionTarget::IGNORE_PX |
+                  mavros_msgs::PositionTarget::IGNORE_PY |
+                  mavros_msgs::PositionTarget::IGNORE_PZ |
+                  mavros_msgs::PositionTarget::IGNORE_YAW;
+  setpoint_raw_pub_.publish(cmd);
+
+  // 调试镜像 (ENU)
+  if (cmd_vel_pub_.getNumSubscribers() > 0) {
+    geometry_msgs::TwistStamped twist;
+    twist.header.stamp = ros::Time::now();
+    twist.header.frame_id = "map";
+    twist.twist.linear.x = vel_enu.x();
+    twist.twist.linear.y = vel_enu.y();
+    twist.twist.linear.z = vel_enu.z();
+    twist.twist.angular.z = vel_enu.w();
     cmd_vel_pub_.publish(twist);
   }
 }
@@ -478,7 +514,7 @@ void PlandController::step() {
     }
 
     double current_z = get_current_z();
-    double xy_error_norm = detector_target_pos_body_.head<2>().norm();
+    double xy_error_norm = detector_err_enu_.head<2>().norm();
 
     // 盲降状态判定与切入
     if (current_z < blind_drop_alt_ && xy_error_norm < blind_drop_xy_thresh_) {
@@ -493,8 +529,23 @@ void PlandController::step() {
     auto smooth_vel = velocity_smoother_.apply_constraints(
         raw_target_vel, yaw_enu_, dt,
         total_max_speed_xy, max_vel_z_, max_w,
-        acc_xy, decel_xy);
-    cmd_vel(smooth_vel);
+        acc_xy, decel_xy,
+        1000.0, 2.0, 1000.0, 3.0,
+        /*world_frame=*/true);
+    if (command_frame_ == "body") {
+      // 方案④: ENU 合成结果转回机体系交付 (残差 span = 一个控制周期)
+      double cy = std::cos(yaw_enu_);
+      double sy = std::sin(yaw_enu_);
+      Eigen::Vector4d vel_body;
+      vel_body.x() =  cy * smooth_vel.x() + sy * smooth_vel.y();
+      vel_body.y() = -sy * smooth_vel.x() + cy * smooth_vel.y();
+      vel_body.z() = smooth_vel.z();
+      vel_body.w() = smooth_vel.w();
+      cmd_vel(vel_body);
+    } else {
+      // 方案⑤: 直接以 FRAME_LOCAL_NED 交付 ENU 速度
+      cmd_vel_enu(smooth_vel);
+    }
     return;
   }
 
@@ -512,13 +563,26 @@ void PlandController::step() {
     }
 
     // 盲降期间保持前馈水平速度，以固定触地速度下沉
-    Eigen::Vector3d ff_vel = get_ff_vel_body();
+    Eigen::Vector3d ff_vel = get_ff_vel_enu();
     Eigen::Vector4d raw_vel(ff_vel.x(), ff_vel.y(), -touchdown_velocity_, 0.0);
     auto smooth_vel = velocity_smoother_.apply_constraints(
         raw_vel, yaw_enu_, dt,
         max_speed_xy_, max_vel_z_, 0.5,
-        acc_xy, decel_xy);
-    cmd_vel(smooth_vel);
+        acc_xy, decel_xy,
+        1000.0, 2.0, 1000.0, 3.0,
+        /*world_frame=*/true);
+    if (command_frame_ == "body") {
+      double cy = std::cos(yaw_enu_);
+      double sy = std::sin(yaw_enu_);
+      Eigen::Vector4d vel_body;
+      vel_body.x() =  cy * smooth_vel.x() + sy * smooth_vel.y();
+      vel_body.y() = -sy * smooth_vel.x() + cy * smooth_vel.y();
+      vel_body.z() = smooth_vel.z();
+      vel_body.w() = smooth_vel.w();
+      cmd_vel(vel_body);
+    } else {
+      cmd_vel_enu(smooth_vel);
+    }
     return;
   }
 
@@ -540,8 +604,14 @@ void PlandController::step() {
     auto smooth_vel = velocity_smoother_.apply_constraints(
         vel, yaw_enu_, dt,
         max_speed_xy_, lost_climb_vel_, 0.5,
-        acc_xy, decel_xy);
-    cmd_vel(smooth_vel);
+        acc_xy, decel_xy,
+        1000.0, 2.0, 1000.0, 3.0,
+        /*world_frame=*/true);
+    if (command_frame_ == "body") {
+      cmd_vel(smooth_vel);
+    } else {
+      cmd_vel_enu(smooth_vel);
+    }
     return;
   }
 
@@ -563,11 +633,12 @@ void PlandController::step() {
 void PlandController::update_drone_state(double stamp,
                                          const Eigen::Vector3d &pos_enu,
                                          const Eigen::Quaterniond &orientation,
-                                         const Eigen::Vector3d &vel_enu) {
+                                         const Eigen::Vector3d &vel_body) {
   std::lock_guard<std::mutex> lk(state_mtx_);
   pos_enu_ = pos_enu;
   orientation_ = orientation;
-  vel_enu_ = vel_enu;
+  // odom twist 为机体系 FLU (ArduPilot 与真机 mavros 一致), 经全姿态旋转到 ENU
+  vel_enu_ = orientation * vel_body;
 
   // 提取 FLU 机体系相对 ENU 的偏航角
   yaw_enu_ = std::atan2(
@@ -576,11 +647,11 @@ void PlandController::update_drone_state(double stamp,
 }
 
 void PlandController::update_detector_target(
-    double stamp, const Eigen::Vector3d &target_pos_body,
+    double stamp, const Eigen::Vector3d &target_err_enu,
     const Eigen::Vector3d &target_vel_enu, double target_yaw_body) {
   std::lock_guard<std::mutex> lk(state_mtx_);
   detector_target_stamp_ = stamp;
-  detector_target_pos_body_ = target_pos_body;
+  detector_err_enu_ = target_err_enu; // ENU 方向轴误差 (detector 图像时刻仅旋转)
   detector_target_vel_enu_ = target_vel_enu;
   detector_target_yaw_body_ = target_yaw_body;
 }
