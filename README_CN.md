@@ -22,10 +22,14 @@
 - **自适应多尺度图像增强与检测 (`pland_detector`)**：
   - **高空段 ($Z > 5.0\text{m}$)**：采用纯视觉纹理能量快速粗定位 + 局域 $2\times$ 双三次超分辨率插值（C2F）与动态范围归一化拉伸，实现 12m 极限高空秒级锁靶（高空检出率 $100\%$），解算角点高精度逆映射回原图物理空间。
   - **中低空段 ($Z \le 5.0\text{m}$)**：平滑切入全图 CLAHE（对比度受限自适应直方图均衡化）增强，保证 4m 过渡段 4 个大尺寸 Tag 完整在线，近地段全面激活中心 25 个微型小 Tag 阵列（最高 29 个 Tag 联合解算），大幅提升 PnP 刚性与空间几何抗噪性。
+  - **多模式消融支持**：支持通过 `enhance_mode` 动态切换 `adaptive`（自适应分段）、`roi`（全高空 ROI 粗检）、`sharpen`（全图反锐化）与 `none`（直通），便于算法消融与算力权衡。
 - **机身体系 (FLU) 纯视觉闭环与微分阻尼 (`pland_controller`)**：
   - 目标三维相对位姿直接解算在飞机机身坐标系（`base_link`，前-左-上），消除全局坐标系转换时延与漂移。
-  - 控制器微分反馈直接绑定机体系真实运动速度，提供强阻尼负反馈，配合位置优先自适应偏航角解耦，彻底消除高空及下降过程中的水平画圈与发散振荡。
-- **CTRV 扩展卡尔曼滤波 (EKF)**：基于二维恒定转弯率与速度模型实时估计目标合速度、航向角与角速度，为控制器提供平滑前馈速度补偿。
+  - 控制器微分反馈直接绑定机体系真实相对速度，提供强阻尼负反馈，配合位置优先自适应偏航角解耦，彻底消除高空及下降过程中的水平画圈与发散振荡。
+  - **偏航前馈一阶惯性滞后滤波**：引入时间常数 $\tau = 0.6\text{s}$ 的一阶低通滤波，实现持续大弯转弯前馈无损透传（零稳态滞后）与高频蛇形甩头机动自然平滑衰减。
+- **3D 观测 CTRV 扩展卡尔曼滤波 (EKF)**：
+  - 测量向量直接融合绝对偏航角 $\mathbf{z} = [p_x, p_y, \psi]^T$（观测矩阵 $\mathbf{H} \in \mathbb{R}^{3\times 5}$），彻底消除非线性航向耦合相位滞后；
+  - 过程噪声 $\mathbf{Q}$ 采用标准连续时间 Wiener 过程向离散时间积分规范化计算，动态观测噪声 $\mathbf{R}$ 设定平滑抗饱和边界，保障高动态强机动下的高置信度前馈速度解算。
 - **自适应降落漏斗与增益调度**：对齐容差随高度降低呈漏斗状线性收敛（$r_{\text{tol}} = r_{\min} + k \cdot z$），近地阶段控制增益自适应平滑衰减，有效抑制地面效应气流干扰。
 - **六状态鲁棒状态机 (FSM)**：统一调度 `IDLE`、`TRACING_GPS`、`TRACING_DETECTOR`、`BLIND_DROP`、`TARGET_LOST` 与 `LANDED` 状态，支持 GPS 到视觉的无缝平滑衔接。
 
@@ -37,7 +41,7 @@
 | :--- | :--- | :--- |
 | **1. 静止目标 (Stationary)** | `STOP` | 针对静止标靶的高精度悬停对齐、漏斗收敛与末端触地盲降。 |
 | **2. 直线运动目标 (Straight-Line)** | `FORWARD` / `BACKWARD` | 跟踪直线恒速或加减速运动目标，通过 CTRV 速度前馈补偿消除跟随滞后。 |
-| **3. 蛇形/变道机动目标 (Snake Maneuver)** | `SNAKE` | 模拟车辆在道路行驶中的拐弯与变道机动，平板车身**沿切线方向自转偏航**并沿圆弧运动（转弯半径满足 $R = v / \|\omega\|$），支持在界面动态调节**旋转半径 ($R$)** 与**旋转弧度 ($\theta$)**。 |
+| **3. 蛇形/变道机动目标 (Snake Maneuver)** | `SNAKE` | 模拟车辆在道路行驶中的连续正弦拐弯与变道机动（$\psi(t) = \theta_{\max} \sin(\omega_f t)$），平板车身**沿切线方向自转偏航**并沿圆弧运动，支持在界面动态调节**旋转半径 ($R$)** 与**旋转弧度 ($\theta$)**。 |
 
 ---
 
@@ -104,7 +108,7 @@ rostopic echo /pland/state
 | `/roscam/cam/image_raw` | `sensor_msgs/Image` | 订阅 | 原始相机图像输入 |
 | `/mavros/local_position/odom` | `nav_msgs/Odometry` | 订阅 | 飞控本体系里程计与姿态 |
 | `/pland/target_pose` | `geometry_msgs/PoseStamped` | 发布 | 目标在机体系 (`base_link`, FLU) 下的 3D 相对位姿 |
-| `/pland/target_vel` | `geometry_msgs/TwistStamped` | 发布 | 目标在世界系 (`map`, ENU) 下的估计前馈速度 |
+| `/pland/target_vel` | `geometry_msgs/TwistStamped` | 发布 | 目标在世界系 (`map`, ENU) 下的估计前馈速度与偏航角速度 |
 | `/pland/target_pixel` | `geometry_msgs/PointStamped` | 发布 | 目标在图像平面的归一化像素坐标 $[0, 1]$ |
 
 ### `pland_controller` 降落控制模块
@@ -125,19 +129,21 @@ rostopic echo /pland/state
 ### 1. `pland_detector` 配置 (`pland_detector.yaml`)
 | 参数项 | 默认值 | 类型 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `enable_c2f_enhancement` | `true` | bool | 开启自适应多尺度图像增强（高空 C2F 超分 + 低空全图 CLAHE） |
+| `enable_c2f_enhancement` | `true` | bool | 是否启用自适应多尺度图像增强 |
+| `enhance_mode` | `adaptive` | string | 增强模式: `adaptive` (分段自适应) / `roi` (仅超分) / `sharpen` (反锐化) / `none` (直通) |
+| `disable_all_enhancement`| `false`| bool | 一键关闭所有图像增强处理 (消融对比基线) |
 | `velocity_deadzone` | `0.2` | double (m/s) | 目标速度滤波死区，低于该值视目标为静止 |
 | `publish_debug_image` | `true` | bool | 是否发布绘制了角点与位姿信息的调试图像 |
 | `gimbal_in_degrees` | `true` | bool | 云台回读角度单位是否为度（度自动转弧度） |
-
-云台按轴独立配置于 `drone_config.yaml`（静态硬件文件）：每轴 `gimbal_*_topic`（数据来源话题，留空 = 无回读）与 `gimbal_*_frame`（`ground` 相对大地绝对角 / `body` 相对机体角）；相机光心杆臂配置 `camera_offset_x/y/z`。无回读时兜底为固定云台垂直向下 90°。
 
 ### 2. `pland_controller` 配置 (`pland_controller.yaml`)
 | 参数项 | 默认值 | 单位 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `vision_kp` | `1.0` | - | 视觉水平位置比例反馈增益 ($P$) |
-| `vision_kd` | `0.35` | - | 视觉机体系速度微分阻尼增益 ($D$)，有效抑制水平画圈振荡 |
-| `max_yaw_rate` | `1.2` | rad/s | 偏航角速度限幅，防止大偏航误差时机动过猛 |
+| `vision_kd` | `0.35` | - | 视觉相对速度微分阻尼增益 ($D$)，有效抑制水平画圈振荡 |
+| `gamma_yaw` | `1.5` | - | 偏航角比例跟踪增益 |
+| `max_yaw_rate` | `1.2` | rad/s | 偏航角速度限幅 |
+| `yaw_ff_tau` | `0.6` | s | 偏航前馈一阶惯性滞后滤波时间常数，平滑高频抖动 |
 | `xy_align_thresh` | `0.45` | m | 水平位置优先收敛阈值，大于该误差时优先水平对齐并限速下降 |
 | `touchdown_velocity` | `0.4` | m/s | 触地阶段恒定下降速度 |
 | `blind_drop_alt` | `0.3` | m | 进入盲降阶段的高度阈值 |
@@ -146,6 +152,7 @@ rostopic echo /pland/state
 | `max_speed_xy` | `1.0` | m/s | 水平最大反馈控制速度 |
 | `target_distance` | `3.0` | m | GPS 巡航转视觉跟踪的切换距离阈值 |
 | `use_ff_vel` | `true` | bool | 是否启用目标 CTRV 速度前馈补偿 |
+| `baseline_mode` | `false` | bool | 常规 PID 退化基线开关 (无 Kd 阻尼 + 紧耦合偏航 + 恒速下降，用于对比实验) |
 
 ---
 

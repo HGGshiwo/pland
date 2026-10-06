@@ -5,12 +5,14 @@
 
 class KalmanFilterCTRV {
    public:
-    // 基础观测噪声方差 (理想状态下的像素投影误差)
-    double base_r_noise_ = 0.3;
+    // 基础观测噪声方差 (理想状态下的位置测量方差 m^2)
+    double base_r_noise_ = 0.15;
+    // 航向角观测噪声方差 (rad^2, 约 5 度标准差，高置信度)
+    double base_r_yaw_noise_ = 0.01;
     // AKF 马氏距离阈值 (超过此值判定为目标机动)
-    double adaptive_threshold_ = 5.0;
+    double adaptive_threshold_ = 6.0;
     double max_q_scale_ = 10.0;
-    int update_count_ = 0;  // 新增计数器
+    int update_count_ = 0;
 
     KalmanFilterCTRV() {
         // 状态向量 x: [pos_x, pos_y, v, yaw, omega]^T
@@ -18,17 +20,18 @@ class KalmanFilterCTRV {
         P_.setIdentity();
         P_ *= 10.0;
 
-        // 观测矩阵 H: 我们只测量位置 [pos_x, pos_y]
+        // 观测矩阵 H: 测量位置与航向 [pos_x, pos_y, yaw]
         H_.setZero();
         H_(0, 0) = 1.0;
         H_(1, 1) = 1.0;
+        H_(2, 3) = 1.0;
     }
 
     void reset() {
         x_.setZero();
         P_.setIdentity();
         P_ *= 10.0;
-        update_count_ = 0;  // 重置时清零
+        update_count_ = 0;
     }
 
     // 辅助函数：将角度归一化到 [-pi, pi]
@@ -38,29 +41,19 @@ class KalmanFilterCTRV {
         return angle;
     }
 
-    void force_set_state(double x, double y) {
-        // 将状态向量直接重置
-        x_ << x, y, 0.0, 0.0, 0.0;
-
-        // 【重要】重置协方差矩阵 P
-        // 因为状态已经被强制设定为极高置信度了，
-        // 我们需要把协方差调小，告诉滤波器：“我现在对这个新位置非常确信”
+    void force_set_state(double x, double y, double yaw = 0.0) {
+        x_ << x, y, 0.0, normalize_angle(yaw), 0.0;
         P_.setIdentity();
-        P_ *= 0.01;  // 赋予一个很小的初始不确定度
+        P_ *= 0.1;
     }
 
-    // [重磅升级] 外部传入最大线加速度(max_acc)和最大角加速度(max_yaw_acc)
+    // [升级] 融合绝对航向角 (meas_yaw) 消除非线性耦合滞后，并放宽机动加速度限制
     Eigen::Vector2d update(double& epsilon, double meas_x, double meas_y,
-                           double dt, double current_z, double angular_rate,
-                           double visual_angle_deg, double max_acc = 1.0,
-                           double max_yaw_acc = 0.5) {
+                           double meas_yaw, double dt, double current_z,
+                           double angular_rate, double visual_angle_deg,
+                           double max_acc = 3.0, double max_yaw_acc = 3.5) {
         update_count_++;
         if (dt <= 1e-4) return get_vel();
-
-        // 速度阻尼 (Velocity Damping / Leaky Integrator)
-        // 就像给物理世界加入了空气阻力，如果没有强烈的连续观测支撑，速度会自动衰减
-        // double velocity_damping = 0.95;  // 调参：0.95 代表每帧衰减 5% 的速度
-        // x_(2) *= velocity_damping;
 
         // 提取当前状态
         double px = x_(0);
@@ -72,7 +65,6 @@ class KalmanFilterCTRV {
         // --- 1. 非线性状态预测 (Predict State) ---
         Vector5d x_pred = x_;
 
-        // 核心：分母极小值保护 (直线运动 vs 圆周运动)
         if (std::abs(omega) > 1e-4) {
             x_pred(0) =
                 px + (v / omega) * (std::sin(yaw + omega * dt) - std::sin(yaw));
@@ -82,9 +74,9 @@ class KalmanFilterCTRV {
             x_pred(0) = px + v * dt * std::cos(yaw);
             x_pred(1) = py + v * dt * std::sin(yaw);
         }
-        x_pred(3) = normalize_angle(yaw + omega * dt);  // 航向角预测
+        x_pred(3) = normalize_angle(yaw + omega * dt);
 
-        // --- 2. 计算雅可比矩阵 F_j (状态转移对状态量的偏导数) ---
+        // --- 2. 计算雅可比矩阵 F_j ---
         Matrix5d F_j;
         F_j.setIdentity();
 
@@ -105,7 +97,6 @@ class KalmanFilterCTRV {
         } else {
             F_j(0, 2) = std::cos(yaw) * dt;
             F_j(0, 3) = -v * std::sin(yaw) * dt;
-            // omega 趋于0时的洛必达极限近似
             F_j(0, 4) = -0.5 * v * std::sin(yaw) * dt * dt;
 
             F_j(1, 2) = std::sin(yaw) * dt;
@@ -114,53 +105,67 @@ class KalmanFilterCTRV {
         }
         F_j(3, 4) = dt;
 
-        // --- 3. 动态生成过程噪声 Q (依赖外部传入的 max_acc 和 max_yaw_acc) ---
+        // --- 3. 动态生成过程噪声 Q (基于标准连续时间向离散时间积分公式: Bar-Shalom 规范) ---
         double dt2 = dt * dt;
         double dt3 = dt2 * dt;
-        double dt4 = dt3 * dt;
         double var_a = max_acc * max_acc;
         double var_yaw_a = max_yaw_acc * max_yaw_acc;
 
         Matrix5d Q;
         Q.setZero();
-        Q(0, 0) = dt4 / 4.0 * var_a;
-        Q(0, 2) = dt3 / 2.0 * var_a;
-        Q(1, 1) = dt4 / 4.0 * var_a;
-        Q(1, 2) = dt3 / 2.0 * var_a;
-        Q(2, 0) = dt3 / 2.0 * var_a;
-        Q(2, 1) = dt3 / 2.0 * var_a;
-        Q(2, 2) = dt2 * var_a;
-        Q(3, 3) = dt4 / 4.0 * var_yaw_a;
-        Q(3, 4) = dt3 / 2.0 * var_yaw_a;
-        Q(4, 3) = dt3 / 2.0 * var_yaw_a;
-        Q(4, 4) = dt2 * var_yaw_a;
+        // 水平位置与线速度子块 [px, py, v] (积分得 dt^3/3, dt^2/2, dt)
+        Q(0, 0) = dt3 / 3.0 * var_a;
+        Q(0, 2) = dt2 / 2.0 * var_a;
+        Q(1, 1) = dt3 / 3.0 * var_a;
+        Q(1, 2) = dt2 / 2.0 * var_a;
+        Q(2, 0) = dt2 / 2.0 * var_a;
+        Q(2, 1) = dt2 / 2.0 * var_a;
+        Q(2, 2) = dt * var_a;
+
+        // 航向角与角速度子块 [yaw, omega] (积分得 dt^3/3, dt^2/2, dt)
+        Q(3, 3) = dt3 / 3.0 * var_yaw_a;
+        Q(3, 4) = dt2 / 2.0 * var_yaw_a;
+        Q(4, 3) = dt2 / 2.0 * var_yaw_a;
+        Q(4, 4) = dt * var_yaw_a;
 
         Matrix5d P_pred = F_j * P_ * F_j.transpose() + Q;
 
-        // --- 4. 动态观测噪声 R ---
-        double height_factor = std::clamp(current_z / 2.0, 0.8, 3.0);
-        double rotation_factor = 1.0 + angular_rate * 5.0;
-        double angle_factor = 1.0 + std::pow(visual_angle_deg / 10.0, 2.0);
+        // --- 4. 动态观测噪声 R (严格平滑约束上限，防止过过度膨胀导致滤波迟钝) ---
+        double height_factor = std::clamp(current_z / 3.5, 0.6, 1.8);
+        double rotation_factor = std::clamp(1.0 + angular_rate * 1.5, 1.0, 2.0);
+        double angle_factor = std::clamp(1.0 + std::pow(visual_angle_deg / 15.0, 2.0), 1.0, 2.0);
 
-        double dynamic_r = base_r_noise_ * height_factor * height_factor *
-                           rotation_factor * angle_factor;
+        double dynamic_r_pos = std::clamp(
+            base_r_noise_ * height_factor * rotation_factor * angle_factor,
+            0.05, 1.2);
+        double dynamic_r_yaw = std::clamp(
+            base_r_yaw_noise_ * rotation_factor * angle_factor,
+            0.01, 0.2);
 
-        Eigen::Matrix2d R;
-        R.setIdentity();
-        R *= dynamic_r;
+        Eigen::Matrix3d R;
+        R.setZero();
+        R(0, 0) = dynamic_r_pos;
+        R(1, 1) = dynamic_r_pos;
+        R(2, 2) = dynamic_r_yaw;
 
-        // --- 5. 计算残差与自适应 AKF ---
-        Eigen::Vector2d z(meas_x, meas_y);
-        Eigen::Vector2d y = z - H_ * x_pred;
-        Eigen::Matrix2d S = H_ * P_pred * H_.transpose() + R;
+        // --- 5. 计算 3D 观测残差与自适应 AKF ---
+        Eigen::Vector3d z(meas_x, meas_y, normalize_angle(meas_yaw));
+        Eigen::Vector3d y;
+        y(0) = z(0) - x_pred(0);
+        y(1) = z(1) - x_pred(1);
+        y(2) = normalize_angle(z(2) - x_pred(3)); // 航向残差环绕保护
 
+        // 如果航向角残差超过 60 度 (异常跳变门限)，动态提高该帧航向噪声以防野值冲击
+        if (std::abs(y(2)) > 1.0) {
+            R(2, 2) *= 10.0;
+        }
+
+        Eigen::Matrix3d S = H_ * P_pred * H_.transpose() + R;
         epsilon = y.transpose() * S.inverse() * y;
 
         double dynamic_threshold = adaptive_threshold_;
-
         if (current_z > 3.0) {
-            // 超过 3 米的高空，每高 1 米，阈值增加 2.0
-            dynamic_threshold += std::min(10.0, (current_z - 3.0) * 2.0);
+            dynamic_threshold += std::min(6.0, (current_z - 3.0) * 1.5);
         }
 
         if (epsilon > dynamic_threshold) {
@@ -172,10 +177,10 @@ class KalmanFilterCTRV {
         }
 
         // --- 6. 更新阶段 (Update) ---
-        Eigen::Matrix<double, 5, 2> K = P_pred * H_.transpose() * S.inverse();
+        Eigen::Matrix<double, 5, 3> K = P_pred * H_.transpose() * S.inverse();
 
         x_ = x_pred + K * y;
-        x_(3) = normalize_angle(x_(3));  // 确保更新后的航向角依然在合法区间
+        x_(3) = normalize_angle(x_(3));
 
         Matrix5d I = Matrix5d::Identity();
         P_ = (I - K * H_) * P_pred;
@@ -187,7 +192,7 @@ class KalmanFilterCTRV {
 
     // CTRV 模型的速度分解
     Eigen::Vector2d get_vel() const {
-        if (update_count_ < 5) {
+        if (update_count_ < 3) {
             return Eigen::Vector2d(0.0, 0.0);
         }
         double v = x_(2);
@@ -204,5 +209,5 @@ class KalmanFilterCTRV {
 
     Vector5d x_;
     Matrix5d P_;
-    Eigen::Matrix<double, 2, 5> H_;
+    Eigen::Matrix<double, 3, 5> H_;
 };

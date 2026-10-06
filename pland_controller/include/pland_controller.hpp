@@ -51,6 +51,9 @@ private:
   double vision_kp_ = 0.0;               // 纯视觉相对速度控制增益 (Kp)
   double vision_kd_ = 0.0;               // 纯视觉相对速度阻尼增益 (Kd, 消除摆动)
   double max_yaw_rate_ = 1.2;            // 偏航角速度控制上限 (rad/s)
+  double yaw_ff_tau_ = 0.6;              // 偏航前馈一阶惯性滞后滤波时间常数 (s)
+  double ff_omega_filtered_ = 0.0;       // 滤波后的偏航前馈角速度 (rad/s)
+  ros::Time last_ff_omega_time_;         // 偏航前馈滤波时间戳
 
   // 对齐容差与阈值
   double xy_align_thresh_ = 0.0;         // 水平对齐允许下降的误差门限 (m)
@@ -75,6 +78,7 @@ private:
   // 行为与模式开关
   bool use_disarm_ = false;              // 触地后是否直接上锁
   bool use_ff_vel_ = false;              // 是否使用目标前馈速度
+  bool baseline_mode_ = false;           // 常规PID退化基线 (默认关闭): 无Kd阻尼 + 紧耦合偏航 + 恒速下降
   double target_timeout_ = 0.0;          // 视觉目标丢失超时间隔 (s)
   double target_distance_ = 0.0;         // 允许切入视觉精准降落的目标距离 (m)
   double target_distance_hysteresis_ = 0.0; // 退出视觉切回GPS的迟滞距离带宽 (m)

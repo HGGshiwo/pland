@@ -1,4 +1,4 @@
-command_frame: enu  # 指令交付坐标系: enu=FRAME_LOCAL_NED 直发(方案⑤) / body=转回机体系(方案④)
+command_frame: enu
 touchdown_velocity: 0.4
 touchdown_z_thresh: 0.3
 lost_target_alt: 8
@@ -29,6 +29,8 @@ max_ff_vel: 1.5
 lost_climb_vel: 0.4
 use_disarm: true
 use_ff_vel: true
+baseline_mode: false
 target_timeout: 1
 target_distance: 3
 target_distance_hysteresis: 1
+yaw_ff_tau: 0.6

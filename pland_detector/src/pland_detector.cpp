@@ -115,6 +115,18 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
   }
 
   pnh.param<bool>("enable_c2f_enhancement", enable_c2f_enhancement_, true);
+  pnh.param<bool>("disable_all_enhancement", disable_all_enhancement_, false);
+  pnh.param<std::string>("enhance_mode", enhance_mode_, "adaptive");
+  if (enhance_mode_ != "none" && enhance_mode_ != "sharpen" &&
+      enhance_mode_ != "roi" && enhance_mode_ != "adaptive") {
+    ROS_WARN_STREAM("[PlandDetector] unknown enhance_mode '" << enhance_mode_
+                    << "', fallback to 'adaptive' (可选: none/sharpen/roi/adaptive)");
+    enhance_mode_ = "adaptive";
+  }
+  ROS_INFO_STREAM("[PlandDetector] enhance_mode = " << enhance_mode_);
+  if (disable_all_enhancement_) {
+    ROS_WARN("[PlandDetector] disable_all_enhancement=true: 所有图像增强已关闭, 灰度图直通检测!");
+  }
   clahe_ = cv::createCLAHE(2.0, cv::Size(8, 8));
 }
 
@@ -122,6 +134,8 @@ void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   // 动态参数：直接绑定变量，从 YAML/rosparam 读取，未提供则报错跳过
   sync.bind("velocity_deadzone", velocity_deadzone_);
   sync.bind("enable_c2f_enhancement", enable_c2f_enhancement_);
+  sync.bind("disable_all_enhancement", disable_all_enhancement_);
+  sync.bind("enhance_mode", enhance_mode_);
 }
 
 void PlandDetector::reset() {
@@ -210,11 +224,19 @@ void PlandDetector::detect(DetectorResult &output) {
   output.detected = current_img.clone();
   SafeDetections detections(nullptr);
 
-  if (enable_c2f_enhancement_ && current_z > 5.0) {
-    // 【高空段 > 5.0m】：C2F 纹理粗检 240x240 ROI + 局域 2.0x 双三次插值超分与反锐化 (此时靶标完整落入240x240内)
-    cv::Mat gray_orig;
-    cv::cvtColor(current_img, gray_orig, cv::COLOR_BGR2GRAY);
-    cv::Rect roi_rect = find_texture_roi(gray_orig);
+  // 增强模式分发: disable_all_enhancement_ 优先级最高;
+  // adaptive 模式额外受旧开关 enable_c2f_enhancement_ 门控 (false 时退化为 none, 兼容旧配置)
+  std::string mode = disable_all_enhancement_ ? std::string("none") : enhance_mode_;
+  if (mode == "adaptive" && !enable_c2f_enhancement_)
+    mode = "none";
+
+  cv::Mat gray;
+  cv::cvtColor(current_img, gray, cv::COLOR_BGR2GRAY);
+
+  if (mode == "roi" || (mode == "adaptive" && current_z > 5.0)) {
+    // ROI 粗定位 240x240 + 局域 2.0x 双三次插值超分与反锐化
+    // (roi 模式全高度启用; adaptive 模式仅高空 > 5.0m 启用, 此时靶标完整落入 240x240 内)
+    cv::Rect roi_rect = find_texture_roi(gray);
 
     if (roi_rect.width > 0 && roi_rect.height > 0) {
       cv::Mat roi = current_img(roi_rect);
@@ -240,13 +262,18 @@ void PlandDetector::detect(DetectorResult &output) {
         }
       }
     } else {
-      detections = tag_detector_->detect(gray_orig);
+      detections = tag_detector_->detect(gray);
     }
+  } else if (mode == "sharpen") {
+    // 全图统一反锐化掩模 (不分高度、不定位)
+    cv::Mat gaussian;
+    cv::GaussianBlur(gray, gaussian, cv::Size(0, 0), 2.0);
+    cv::addWeighted(gray, 1.8, gaussian, -0.8, 0, gray);
+    detections = tag_detector_->detect(gray);
   } else {
-    // 【中低空段 <= 6.0m】：CLAHE 全图直方图均衡化送检 (保证4个大Tag与中心25个小Tag全部完整送检，杜绝裁切)
-    cv::Mat gray;
-    cv::cvtColor(current_img, gray, cv::COLOR_BGR2GRAY);
-    if (enable_c2f_enhancement_ && clahe_) {
+    // none: 灰度直通; adaptive 低空段 (<= 5.0m): CLAHE 全图直方图均衡化送检
+    // (保证4个大Tag与中心25个小Tag全部完整送检，杜绝裁切)
+    if (mode == "adaptive" && clahe_) {
       clahe_->apply(gray, gray);
     }
     detections = tag_detector_->detect(gray);
@@ -366,7 +393,7 @@ void PlandDetector::detect(DetectorResult &output) {
   if (!has_last_valid_pos_ || dt_ekf <= 1e-4 || dt_ekf > 1.0) {
     reset();
     dt_ekf = 0.033;
-    kf_xy_->force_set_state(raw_target_enu.x(), raw_target_enu.y());
+    kf_xy_->force_set_state(raw_target_enu.x(), raw_target_enu.y(), abs_yaw);
     kf_yaw_->force_set_state(relative_yaw);
     kf_abs_yaw_->force_set_state(abs_yaw);
   }
@@ -383,10 +410,10 @@ void PlandDetector::detect(DetectorResult &output) {
   double current_visual_angle_deg =
       std::atan2(dist_xy, current_z) * 180.0 / M_PI;
 
-  // 执行 KF 滤波
+  // 执行 KF 滤波 (CTRV-EKF 融合绝对航向角 abs_yaw，消除航向耦合滞后)
   double current_angular_rate = vel_angular_body_.norm();
   double epsilon = 0;
-  kf_xy_->update(epsilon, raw_target_enu.x(), raw_target_enu.y(), dt_ekf,
+  kf_xy_->update(epsilon, raw_target_enu.x(), raw_target_enu.y(), abs_yaw, dt_ekf,
                  current_z, current_angular_rate, current_visual_angle_deg);
   kf_yaw_->update(relative_yaw, dt_ekf);
   kf_abs_yaw_->update(abs_yaw, dt_ekf);
@@ -405,7 +432,8 @@ void PlandDetector::detect(DetectorResult &output) {
   output.target_pos_enu.z() = raw_target_enu.z();
   output.target_yaw_enu = kf_abs_yaw_->get_yaw();
 
-  double yaw_rate = kf_abs_yaw_->get_yaw_rate();
+  // double yaw_rate = kf_abs_yaw_->get_yaw_rate();
+  double yaw_rate = kf_xy_->get_yaw_rate();
 
   if (target_state == TargetState::MOVING) {
     output.target_vel_enu << v_xy_enu.x(), v_xy_enu.y(), yaw_rate;

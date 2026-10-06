@@ -341,7 +341,7 @@ def show_altitude_rate_chart(metrics, save_path=None, show=True):
 
 
 class DetectorBenchmarkRunner:
-    def __init__(self, bag_path, image_topic, odom_topic, target_pose_topic, launch_node=True, rate=1.0, duration=None, preprocess_mode="none", tag_count_topic=None):
+    def __init__(self, bag_path, image_topic, odom_topic, target_pose_topic, launch_node=True, rate=1.0, duration=None, preprocess_mode="none", tag_count_topic=None, disable_node_enhancement=False, enhance_mode=None):
         self.bag_path = bag_path
         self.image_topic = image_topic
         self.odom_topic = odom_topic
@@ -351,6 +351,8 @@ class DetectorBenchmarkRunner:
         self.playback_rate = rate
         self.duration = duration
         self.preprocess_mode = preprocess_mode
+        self.disable_node_enhancement = disable_node_enhancement
+        self.enhance_mode = enhance_mode
         self.enhancer = ImageEnhancer(preprocess_mode)
 
         self.node_process = None
@@ -385,6 +387,10 @@ class DetectorBenchmarkRunner:
         cx = 320.5 * scale
         cy = 240.5 * scale
 
+        disable_param = ('        <param name="disable_all_enhancement" value="true" />\n'
+                         if self.disable_node_enhancement else '')
+        enhance_mode_param = (f'        <param name="enhance_mode" value="{self.enhance_mode}" />\n'
+                              if self.enhance_mode else '')
         self.temp_launch_path = f"/tmp/pland_benchmark_{int(time.time())}.launch"
         with open(self.temp_launch_path, "w") as f:
             f.write(f'''<launch>
@@ -397,12 +403,17 @@ class DetectorBenchmarkRunner:
         <param name="param_config_path" value="/home/hggshiwo/catkin_ws/src/pland/pland_detector/config/pland_detector.yaml" />
         <param name="drone_config_path" value="/home/hggshiwo/catkin_ws/src/pland/pland_controller/config/drone_config.yaml" />
         <param name="publish_debug_image" value="false" />
-        <rosparam param="camera_inner_matrix">[{fx}, 0.0, {cx}, 0.0, {fy}, {cy}, 0.0, 0.0, 1.0]</rosparam>
+{disable_param}{enhance_mode_param}        <rosparam param="camera_inner_matrix">[{fx}, 0.0, {cx}, 0.0, {fy}, {cy}, 0.0, 0.0, 1.0]</rosparam>
     </node>
 </launch>''')
 
         cmd = ["roslaunch", self.temp_launch_path]
-        print(f"[Benchmark] Launching pland_detector_node (图像缩放倍率: {scale}x, 相机内参: fx={fx:.1f}, cx={cx:.1f})")
+        extra = ""
+        if self.disable_node_enhancement:
+            extra += ", 节点内部增强已关闭"
+        if self.enhance_mode:
+            extra += f", enhance_mode={self.enhance_mode}"
+        print(f"[Benchmark] Launching pland_detector_node (图像缩放倍率: {scale}x, 相机内参: fx={fx:.1f}, cx={cx:.1f}{extra})")
         self.node_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(2.5)
 
@@ -743,6 +754,11 @@ def main():
     parser.add_argument("--save_chart", type=str, default=None, help="识别率-高度统计图保存路径 (默认 altitude_rate_report.png, 或与 --save_json 同名)")
     parser.add_argument("--no_show", action="store_true", help="不弹出统计图窗口，仅保存图片文件")
     parser.add_argument("--no_launch", action="store_true", help="Do not launch node (if node is already running externally)")
+    parser.add_argument("--disable_node_enhancement", action="store_true",
+                        help="Disable node-internal C2F/CLAHE enhancement (disable_all_enhancement=true) for a true raw baseline")
+    parser.add_argument("--enhance_mode", type=str, default=None,
+                        choices=["none", "sharpen", "roi", "adaptive"],
+                        help="Node enhance_mode injected into the launch (overrides pland_detector.yaml); external preprocessing is expected to be 'none' when used")
 
     args = parser.parse_args()
 
@@ -757,7 +773,9 @@ def main():
         rate=args.rate,
         duration=args.duration,
         preprocess_mode=args.preprocess,
-        tag_count_topic=args.tag_count_topic
+        tag_count_topic=args.tag_count_topic,
+        disable_node_enhancement=args.disable_node_enhancement,
+        enhance_mode=args.enhance_mode
     )
 
     metrics = runner.run_benchmark(label=run_label)

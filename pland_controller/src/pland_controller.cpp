@@ -74,6 +74,7 @@ void PlandController::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("vision_kp", vision_kp_);
   sync.bind("vision_kd", vision_kd_);
   sync.bind("max_yaw_rate", max_yaw_rate_);
+  sync.bind("yaw_ff_tau", yaw_ff_tau_);
 
   // 对齐容差与阈值
   sync.bind("xy_align_thresh", xy_align_thresh_);
@@ -98,6 +99,7 @@ void PlandController::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   // 行为与模式开关
   sync.bind("use_disarm", use_disarm_);
   sync.bind("use_ff_vel", use_ff_vel_);
+  sync.bind("baseline_mode", baseline_mode_);
   sync.bind("target_timeout", target_timeout_);
   sync.bind("target_distance", target_distance_);
   sync.bind("target_distance_hysteresis", target_distance_hysteresis_);
@@ -111,6 +113,8 @@ void PlandController::reset() {
   inject_target_stamp_ = 0.0;
   detector_target_stamp_ = 0.0;
   last_step_time_ = 0.0;
+  ff_omega_filtered_ = 0.0;
+  last_ff_omega_time_ = ros::Time(0);
   velocity_smoother_.reset();
   land_triggered_ = false;
   has_rangefinder_ = false;
@@ -203,97 +207,133 @@ Eigen::Vector4d PlandController::get_tracing_detector_target_vel() {
   double ff_omega = detector_target_vel_enu_.z(); // 目标偏航角速度前馈
   double current_z = get_current_z();
 
-  // 1. 低空保护：低于盲降门限时锁死偏航角与偏航角速度，只进行平移修正，给无人机充足的高度完成偏航对齐
+  // 1. 偏航前馈一阶惯性滞后滤波 (Low-Pass Lag Filter)
+  // 保持稳态大弯无损跟踪 (增益 1.0)，平滑过滤高频蛇形甩头与机动抖动
+  double ff_omega_raw = detector_target_vel_enu_.z();
+  ros::Time now = ros::Time::now();
+  double dt_ff = last_ff_omega_time_.isZero() ? 0.033 : (now - last_ff_omega_time_).toSec();
+  last_ff_omega_time_ = now;
+  dt_ff = std::clamp(dt_ff, 0.001, 0.2);
+
+  double alpha = dt_ff / std::max(0.01, yaw_ff_tau_ + dt_ff);
+  ff_omega_filtered_ += alpha * (ff_omega_raw - ff_omega_filtered_);
+
+  // 低空盲降保护：低于盲降门限时锁死偏航角与偏航角速度，只进行平移修正与触地盲降
   double yaw_lock_alt = std::max(0.2, blind_drop_alt_);
   if (current_z < yaw_lock_alt) {
     err_yaw = 0.0;
-    ff_omega = 0.0;
+    ff_omega_filtered_ = 0.0;
   }
 
   Eigen::Vector2d ff_vel_enu = get_ff_vel_enu().head<2>();
 
-  // 2. 偏航-平移解耦控制 (位置优先，防止远距离大旋转产生离心画圈)
   double xy_error_norm = err_enu.norm();
 
-  // 水平速度指令 (加入相对速度阻尼项 Kd_xy，消除左右晃动与超调)
-  double Kp_xy = vision_kp_;
-  double Kd_xy = vision_kd_;
-  double max_v_xy = max_speed_xy_;
-
-  Eigen::Vector2d v_drone_enu_xy = get_drone_vel_enu_xy();
-  Eigen::Vector2d v_rel_xy = v_drone_enu_xy - ff_vel_enu;
-
-  Eigen::Vector2d fb_vel_enu = Kp_xy * err_enu - Kd_xy * v_rel_xy;
-  if (max_v_xy > 0.0 && fb_vel_enu.norm() > max_v_xy) {
-    fb_vel_enu = fb_vel_enu.normalized() * max_v_xy;
-  }
-
-  Eigen::Vector2d vel_xy_enu = fb_vel_enu + ff_vel_enu;
-
-  // 3. 偏航角速度指令：平滑自适应位置解耦 (远距离全力平移对中，正上方全额对齐机头)
-  double yaw_weight = 1.0;
-  double max_decouple_radius = std::max(0.8, current_z * 0.15); // 随着高度平滑自适应放宽
-  double min_decouple_radius = 0.35;
-
-  if (xy_error_norm > max_decouple_radius) {
-    yaw_weight = 0.0; // 远距离时严禁偏航自转，确保飞机笔直冲向靶心，彻底消除离心画圈
-  } else if (xy_error_norm > min_decouple_radius) {
-    yaw_weight = 1.0 - (xy_error_norm - min_decouple_radius) / (max_decouple_radius - min_decouple_radius);
-  } else {
-    yaw_weight = 1.0; // 接近靶标正上方，全额开启偏航对齐
-  }
-
-  double Kp_yaw = gamma_yaw_ > 0.0 ? gamma_yaw_ : 1.5;
-  double omega_z = (Kp_yaw * err_yaw * yaw_weight) + ff_omega;
-  double max_w = max_yaw_rate_ > 0.0 ? max_yaw_rate_ : 1.2;
-  omega_z = std::clamp(omega_z, -max_w, max_w);
-
-  // 4. 垂直下降速度计算 (动态漏斗对齐控制)
-
-  double align_dist_thresh =
-      std::max(max_funnel_radius_, current_z * funnel_radius_k_);
-  double hold_dist_height_base = 10.0;
-
-  double hold_dist_thresh = 0.0;
-  if (current_z <= min_hold_dist_thresh_alt_) {
-    hold_dist_thresh = min_hold_dist_thresh_;
-  } else {
-    double factor =
-        (std::min(current_z, hold_dist_height_base) - min_hold_dist_thresh_alt_) /
-        std::max(0.01, hold_dist_height_base - min_hold_dist_thresh_alt_);
-    hold_dist_thresh = min_hold_dist_thresh_ +
-                       factor * (max_hold_dist_thresh_ - min_hold_dist_thresh_);
-  }
-
-  double xy_descent_factor = 1.0;
-  if (xy_error_norm > hold_dist_thresh) {
-    xy_descent_factor = 0.0;
-  } else if (xy_error_norm > align_dist_thresh) {
-    xy_descent_factor =
-        1.0 - (xy_error_norm - align_dist_thresh) /
-                  std::max(0.001, hold_dist_thresh - align_dist_thresh);
-  }
-
-  double abs_yaw_err_deg = std::abs(err_yaw) * 180.0 / M_PI;
-  double yaw_descent_min_deg = 15.0;
-  double yaw_descent_max_deg = 35.0;
-  double yaw_descent_factor = 1.0;
-  if (abs_yaw_err_deg > yaw_descent_max_deg) {
-    yaw_descent_factor = 0.0;
-  } else if (abs_yaw_err_deg > yaw_descent_min_deg) {
-    yaw_descent_factor =
-        1.0 - (abs_yaw_err_deg - yaw_descent_min_deg) /
-                  (yaw_descent_max_deg - yaw_descent_min_deg);
-  }
-
-  double descent_factor = xy_descent_factor * yaw_descent_factor;
+  Eigen::Vector2d vel_xy_enu;
+  double omega_z = 0.0;
   double descent_vel = 0.0;
-  if (descent_factor > 0.05) {
-    double takeoff_alt = 10.0;
-    double alt_ratio =
-        std::min(1.0, std::abs(current_z / std::max(takeoff_alt, 1.0)));
-    double base_descent_vel = 0.2 + alt_ratio * 0.8;
-    descent_vel = base_descent_vel * descent_factor;
+
+  if (baseline_mode_) {
+    // === 常规 PID 模式 (Conventional PID Baseline) ===
+    // 1. 无机体速度微分阻尼 (Kd = 0): 纯比例位置反馈 + 目标前馈
+    Eigen::Vector2d fb_vel_enu = vision_kp_ * err_enu;
+    if (max_speed_xy_ > 0.0 && fb_vel_enu.norm() > max_speed_xy_) {
+      fb_vel_enu = fb_vel_enu.normalized() * max_speed_xy_;
+    }
+    vel_xy_enu = fb_vel_enu + ff_vel_enu;
+
+    // 2. 紧耦合偏航 (无解耦, 权重恒为 1.0)
+    double Kp_yaw = gamma_yaw_ > 0.0 ? gamma_yaw_ : 1.5;
+    double max_w = max_yaw_rate_ > 0.0 ? max_yaw_rate_ : 1.2;
+    omega_z = std::clamp(Kp_yaw * err_yaw + ff_omega_filtered_, -max_w, max_w);
+
+    // 3. 常规恒速下降 (无动态漏斗约束)
+    descent_vel = 0.5;
+  } else {
+    // === 本文提出的解耦 + 阻尼 + 漏斗模式 (Proposed Method) ===
+
+    // 2. 偏航-平移解耦控制 (位置优先，防止远距离大旋转产生离心画圈)
+
+    // 水平速度指令 (加入相对速度阻尼项 Kd_xy，消除左右晃动与超调)
+    double Kp_xy = vision_kp_;
+    double Kd_xy = vision_kd_;
+    double max_v_xy = max_speed_xy_;
+
+    Eigen::Vector2d v_drone_enu_xy = get_drone_vel_enu_xy();
+    Eigen::Vector2d v_rel_xy = v_drone_enu_xy - ff_vel_enu;
+
+    Eigen::Vector2d fb_vel_enu = Kp_xy * err_enu - Kd_xy * v_rel_xy;
+    if (max_v_xy > 0.0 && fb_vel_enu.norm() > max_v_xy) {
+      fb_vel_enu = fb_vel_enu.normalized() * max_v_xy;
+    }
+
+    vel_xy_enu = fb_vel_enu + ff_vel_enu;
+
+    // 3. 偏航角速度指令：平滑自适应位置解耦 (远距离全力平移对中，正上方全额对齐机头)
+    double yaw_weight = 1.0;
+    double max_decouple_radius = std::max(0.8, current_z * 0.15); // 随着高度平滑自适应放宽
+    double min_decouple_radius = 0.35;
+
+    if (xy_error_norm > max_decouple_radius) {
+      yaw_weight = 0.0; // 远距离严禁偏航自转，平飞平移直冲靶心，消除离心画圈
+    } else if (xy_error_norm > min_decouple_radius) {
+      yaw_weight = 1.0 - (xy_error_norm - min_decouple_radius) /
+                             (max_decouple_radius - min_decouple_radius);
+    } else {
+      yaw_weight = 1.0; // 接近靶标正上方，全额开启偏航对齐
+    }
+
+    double Kp_yaw = gamma_yaw_ > 0.0 ? gamma_yaw_ : 1.5;
+    omega_z = (Kp_yaw * err_yaw + ff_omega_filtered_) * yaw_weight;
+    double max_w = max_yaw_rate_ > 0.0 ? max_yaw_rate_ : 1.2;
+    omega_z = std::clamp(omega_z, -max_w, max_w);
+
+    // 4. 垂直下降速度计算 (动态漏斗对齐控制)
+
+    double align_dist_thresh =
+        std::max(max_funnel_radius_, current_z * funnel_radius_k_);
+    double hold_dist_height_base = 10.0;
+
+    double hold_dist_thresh = 0.0;
+    if (current_z <= min_hold_dist_thresh_alt_) {
+      hold_dist_thresh = min_hold_dist_thresh_;
+    } else {
+      double factor =
+          (std::min(current_z, hold_dist_height_base) - min_hold_dist_thresh_alt_) /
+          std::max(0.01, hold_dist_height_base - min_hold_dist_thresh_alt_);
+      hold_dist_thresh = min_hold_dist_thresh_ +
+                         factor * (max_hold_dist_thresh_ - min_hold_dist_thresh_);
+    }
+
+    double xy_descent_factor = 1.0;
+    if (xy_error_norm > hold_dist_thresh) {
+      xy_descent_factor = 0.0;
+    } else if (xy_error_norm > align_dist_thresh) {
+      xy_descent_factor =
+          1.0 - (xy_error_norm - align_dist_thresh) /
+                    std::max(0.001, hold_dist_thresh - align_dist_thresh);
+    }
+
+    double abs_yaw_err_deg = std::abs(err_yaw) * 180.0 / M_PI;
+    double yaw_descent_min_deg = 15.0;
+    double yaw_descent_max_deg = 35.0;
+    double yaw_descent_factor = 1.0;
+    if (abs_yaw_err_deg > yaw_descent_max_deg) {
+      yaw_descent_factor = 0.0;
+    } else if (abs_yaw_err_deg > yaw_descent_min_deg) {
+      yaw_descent_factor =
+          1.0 - (abs_yaw_err_deg - yaw_descent_min_deg) /
+                    (yaw_descent_max_deg - yaw_descent_min_deg);
+    }
+
+    double descent_factor = xy_descent_factor * yaw_descent_factor;
+    if (descent_factor > 0.05) {
+      double takeoff_alt = 10.0;
+      double alt_ratio =
+          std::min(1.0, std::abs(current_z / std::max(takeoff_alt, 1.0)));
+      double base_descent_vel = 0.2 + alt_ratio * 0.8;
+      descent_vel = base_descent_vel * descent_factor;
+    }
   }
 
   if (max_vel_z_ > 0.0) {

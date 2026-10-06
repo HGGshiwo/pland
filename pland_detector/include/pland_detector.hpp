@@ -66,6 +66,8 @@ private:
   // --- 动态可调参数 (支持运行时修改并持久化) ---
   double velocity_deadzone_ = 0.0; // 移动物体速度死区阈值 (m/s)
   bool enable_c2f_enhancement_ = true; // 是否开启高空粗检ROI与低空自适应图像增强
+  bool disable_all_enhancement_ = false; // 总开关: 置 true 时关闭全部增强, 灰度图直通检测 (评测基线用)
+  std::string enhance_mode_ = "adaptive"; // 增强模式: none(直通) / sharpen(全图锐化) / roi(全高度ROI超分) / adaptive(高度自适应C2F)
   cv::Ptr<cv::CLAHE> clahe_;
 
   // --- 静态配置参数 (在 launch / 构造函数中指定) ---

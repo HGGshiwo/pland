@@ -599,35 +599,35 @@ class SimControllerGUI:
             elif mode == "SNAKE":
                 cmd.linear.x = cur_spd
 
-                R = max(self.snake_radius, 0.1)
-                theta_max = max(self.snake_radian, 0.005)
+                R = max(self.snake_radius, 0.3)
+                theta_max = max(self.snake_radian, 0.02)
                 base_v = max(abs(self.motion_speed), 0.05)
 
+                # 物理连续正弦机动模型 (Continuous Sinusoidal Slalom Maneuver)
+                # 航向角: delta_psi(t) = theta_max * sin(omega_freq * t)
+                # 角速度: omega_ff(t) = theta_max * omega_freq * cos(omega_freq * t)
                 omega_0 = base_v / R
-                t1 = theta_max / omega_0
-                t_half = 2.0 * theta_max / omega_0
-                T_period = 2.0 * t_half
+                omega_freq = omega_0 / theta_max
+                # 周期平滑保护 (T >= 2.5s)，确保物理平滑连续
+                T_period = max(2.0 * math.pi / omega_freq, 2.5)
+                omega_freq = 2.0 * math.pi / T_period
+                omega_max = theta_max * omega_freq
 
-                tau = (time.time() - self.snake_start_time) % T_period
+                tau = time.time() - self.snake_start_time
 
-                if tau < t1:
-                    delta_psi = omega_0 * tau
-                    omega_ff = omega_0
-                elif tau < t1 + t_half:
-                    delta_psi = theta_max - omega_0 * (tau - t1)
-                    omega_ff = -omega_0
-                else:
-                    delta_psi = -theta_max + omega_0 * (tau - (t1 + t_half))
-                    omega_ff = omega_0
+                # 1. 理论平滑目标偏航角与连续前馈角速度 (严格满足导数关系)
+                delta_psi = theta_max * math.sin(omega_freq * tau)
+                omega_ff = omega_max * math.cos(omega_freq * tau)
 
                 target_yaw = self.snake_base_yaw + delta_psi
                 yaw_err = math.atan2(math.sin(target_yaw - self.board_yaw),
                                      math.cos(target_yaw - self.board_yaw))
 
-                kp_yaw = 2.0
+                # 2. 闭环增益调节，平滑跟踪
+                kp_yaw = 2.5
                 omega_cmd = omega_ff + kp_yaw * yaw_err
 
-                max_omega = max(2.5 * omega_0, 1.5)
+                max_omega = max(2.0 * omega_max, 1.5)
                 cmd.angular.z = max(-max_omega, min(max_omega, omega_cmd))
 
             self.pub_board_cmd_vel.publish(cmd)
