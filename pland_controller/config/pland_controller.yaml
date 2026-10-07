@@ -33,4 +33,4 @@ baseline_mode: false
 target_timeout: 1
 target_distance: 3
 target_distance_hysteresis: 1
-yaw_ff_tau: 0.6
+yaw_ff_tau: 0.8
