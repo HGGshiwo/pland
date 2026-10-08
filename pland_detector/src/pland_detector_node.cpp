@@ -213,8 +213,9 @@ private:
     if (t <= 0.0) {
       t = ros::Time::now().toSec();
     }
+    // 放宽下限至 0.01m，避免传感器驱动保守的 min_range(0.1m) 导致落地触地(0.04m)误判失效而退化回气压计
     bool is_valid = (!std::isnan(msg->range) && !std::isinf(msg->range) &&
-                     msg->range >= msg->min_range && msg->range <= msg->max_range);
+                     msg->range > 0.01 && msg->range <= msg->max_range);
     detector_->update_rangefinder(t, msg->range, is_valid);
   }
 
