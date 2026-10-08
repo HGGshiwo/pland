@@ -70,6 +70,15 @@ private:
   std::string enhance_mode_ = "adaptive"; // 增强模式: none(直通) / sharpen(全图锐化) / roi(全高度ROI超分) / adaptive(高度自适应C2F)
   cv::Ptr<cv::CLAHE> clahe_;
 
+  // CTRV-EKF 滤波动力学参数
+  double ekf_chi2_nominal_thresh_ = 7.81;
+  double ekf_chi2_outlier_thresh_ = 16.0;
+  double ekf_max_q_scale_ = 3.0;
+  double ekf_nominal_max_acc_ = 0.08;
+  double ekf_nominal_max_yaw_acc_ = 0.5;
+  double ekf_max_dv_acc_ = 0.8;
+  double ekf_max_speed_ = 3.0;
+
   // --- 静态配置参数 (在 launch / 构造函数中指定) ---
   Eigen::Matrix3d camera_inner_matrix_ = Eigen::Matrix3d::Identity();
   std::string tag_family_ = "tag16h5";
@@ -208,5 +217,14 @@ public:
    */
   void set_gimbal_manager(std::unique_ptr<GimbalManager> manager) {
     gimbal_manager_ = std::move(manager);
+  }
+
+  void sync_ekf_params() {
+    if (kf_xy_) {
+      kf_xy_->set_params(ekf_chi2_nominal_thresh_, ekf_chi2_outlier_thresh_,
+                         ekf_max_q_scale_, ekf_nominal_max_acc_,
+                         ekf_nominal_max_yaw_acc_, ekf_max_dv_acc_,
+                         ekf_max_speed_);
+    }
   }
 };

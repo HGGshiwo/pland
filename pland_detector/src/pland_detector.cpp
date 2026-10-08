@@ -88,6 +88,7 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
     tag_detector_ = std::make_unique<SafeAprilTagDetector>(tag_family_);
   }
   kf_xy_ = std::make_shared<KalmanFilterCTRV>();
+  sync_ekf_params();
   kf_yaw_ = std::make_shared<KalmanFilterYaw>();
   kf_abs_yaw_ = std::make_shared<KalmanFilterYaw>();
   target_tracker_ = std::make_shared<TargetTracker>();
@@ -136,6 +137,24 @@ void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("enable_c2f_enhancement", enable_c2f_enhancement_);
   sync.bind("disable_all_enhancement", disable_all_enhancement_);
   sync.bind("enhance_mode", enhance_mode_);
+
+  // CTRV-EKF 滤波动力学参数 (卡方门控、温和Q放大、物理限幅)
+  sync.bind("ekf_chi2_nominal_thresh", ekf_chi2_nominal_thresh_,
+            [&](const double &) { sync_ekf_params(); });
+  sync.bind("ekf_chi2_outlier_thresh", ekf_chi2_outlier_thresh_,
+            [&](const double &) { sync_ekf_params(); });
+  sync.bind("ekf_max_q_scale", ekf_max_q_scale_,
+            [&](const double &) { sync_ekf_params(); });
+  sync.bind("ekf_nominal_max_acc", ekf_nominal_max_acc_,
+            [&](const double &) { sync_ekf_params(); });
+  sync.bind("ekf_nominal_max_yaw_acc", ekf_nominal_max_yaw_acc_,
+            [&](const double &) { sync_ekf_params(); });
+  sync.bind("ekf_max_dv_acc", ekf_max_dv_acc_,
+            [&](const double &) { sync_ekf_params(); });
+  sync.bind("ekf_max_speed", ekf_max_speed_,
+            [&](const double &) { sync_ekf_params(); });
+
+  sync_ekf_params();
 }
 
 void PlandDetector::reset() {
@@ -414,7 +433,8 @@ void PlandDetector::detect(DetectorResult &output) {
   double current_angular_rate = vel_angular_body_.norm();
   double epsilon = 0;
   kf_xy_->update(epsilon, raw_target_enu.x(), raw_target_enu.y(), abs_yaw, dt_ekf,
-                 current_z, current_angular_rate, current_visual_angle_deg);
+                 current_z, current_angular_rate, current_visual_angle_deg,
+                 ekf_nominal_max_acc_, ekf_nominal_max_yaw_acc_);
   kf_yaw_->update(relative_yaw, dt_ekf);
   kf_abs_yaw_->update(abs_yaw, dt_ekf);
 

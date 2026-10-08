@@ -5,3 +5,20 @@ velocity_deadzone: 0.2
 enable_c2f_enhancement: true
 disable_all_enhancement: false # 总开关: 置 true 关闭全部增强 (含粗检ROI/超分锐化/CLAHE), 灰度直通
 enhance_mode: adaptive # 增强模式: none(直通) / sharpen(全图锐化) / roi(全高度ROI超分) / adaptive(高度自适应C2F, 部署默认)
+
+# ================= CTRV-EKF 滤波动力学参数 =================
+# 卡方检验正常机动阈值 (自由度 3, 95% 置信度)
+ekf_chi2_nominal_thresh: 7.81
+# 卡方检验野值抑制阈值 (自由度 3, 99.9% 置信度, 超过此值不放大Q且膨胀R)
+ekf_chi2_outlier_thresh: 16.0
+# AKF 过程噪声 Q 自适应放大上限 (收敛至温和区间，杜绝 10 倍膨胀)
+ekf_max_q_scale: 3.0
+
+# 目标名义物理加速度与角加速度限制 (用于生成名义 Q 矩阵，压平成常规匀速/静止工况)
+ekf_nominal_max_acc: 0.08    # m/s^2 (收敛至 0.08，彻底压平静止目标下的虚假微分速度)
+ekf_nominal_max_yaw_acc: 0.5 # rad/s^2
+
+# 状态更新后速度单步最大允许加速度 (用于防止单帧突变: max_dv = a * dt)
+ekf_max_dv_acc: 0.8          # m/s^2 (限制单步速度变动率，增强滤波平滑度)
+# 目标物理最大极限线速度硬限幅 (杜绝瞬态数百 m/s 爆表)
+ekf_max_speed: 3.0           # m/s
