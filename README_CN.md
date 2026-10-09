@@ -2,7 +2,8 @@
 
 <p align="center">
   <a href="README.md">English</a> |
-  <a href="README_CN.md"><b>简体中文</b></a>
+  <a href="README_CN.md"><b>简体中文</b></a> |
+  <a href="CHANGELOG.md"><b>开发日志</b></a>
 </p>
 
 <p align="center">
@@ -135,6 +136,13 @@ rostopic echo /pland/state
 | `velocity_deadzone` | `0.2` | double (m/s) | 目标速度滤波死区，低于该值视目标为静止 |
 | `publish_debug_image` | `true` | bool | 是否发布绘制了角点与位姿信息的调试图像 |
 | `gimbal_in_degrees` | `true` | bool | 云台回读角度单位是否为度（度自动转弧度） |
+| `ekf_nominal_max_acc` | `0.08` | double (m/s²) | EKF 名义最大物理线加速度 (用于生成名义 Q 矩阵，压平常规静止与匀速工况) |
+| `ekf_nominal_max_yaw_acc` | `0.5` | double (rad/s²) | EKF 名义最大物理角加速度 |
+| `ekf_chi2_nominal_thresh` | `7.81` | double | 卡方检验机动阈值 (自由度 3, 95% 置信度)，超出则温和自适应放大 Q |
+| `ekf_chi2_outlier_thresh` | `16.0` | double | 卡方检验野值门限 (自由度 3, 99.9% 置信度)，超出坚决不放大 Q 并惩罚膨胀 R |
+| `ekf_max_q_scale` | `3.0` | double | AKF 过程噪声自适应放大上限倍数 |
+| `ekf_max_dv_acc` | `0.8` | double (m/s²) | 单步速度变化率物理加速度一致性限幅 ($\Delta v \le a \cdot \Delta t$) |
+| `ekf_max_speed` | `3.0` | double (m/s) | 目标速度硬饱和限幅，彻底杜绝爆表突跳 |
 
 ### 2. `pland_controller` 配置 (`pland_controller.yaml`)
 | 参数项 | 默认值 | 单位 | 说明 |

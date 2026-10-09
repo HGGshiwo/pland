@@ -535,8 +535,15 @@ void PlandController::step() {
         target_distance_ +
         (target_distance_hysteresis_ > 0.0 ? target_distance_hysteresis_ : 1.0);
 
+    double current_z = get_current_z();
+
     if (!detector_target_valid()) {
-      if (inject_target_valid()) {
+      // 关键保护：低空 (< blind_drop_alt) 丢失视觉时，强制切入 BLIND_DROP 盲降触地，严禁向上爬升！
+      if (current_z < blind_drop_alt_) {
+        ROS_WARN("[PlandController] Target lost at low altitude (z=%.2f < %.2f). Enforcing BLIND_DROP!",
+                 current_z, blind_drop_alt_);
+        change_state(ControllerState::BLIND_DROP);
+      } else if (inject_target_valid()) {
         change_state(ControllerState::TRACING_GPS);
       } else {
         change_state(ControllerState::TARGET_LOST);
@@ -553,14 +560,13 @@ void PlandController::step() {
       return;
     }
 
-    double current_z = get_current_z();
-    double xy_error_norm = detector_err_enu_.head<2>().norm();
-
-    // 盲降状态判定与切入
-    if (current_z < blind_drop_alt_ && xy_error_norm < blind_drop_xy_thresh_) {
-      change_state(ControllerState::BLIND_DROP);
+    // 触地检测：只要视觉有效，持续全闭环对齐修正到底，触地直接停机 (彻底消除开环侧漂)
+    if (current_z < exit_alt_) {
+      change_state(ControllerState::LANDED);
       return;
     }
+
+    double xy_error_norm = detector_err_enu_.head<2>().norm();
 
     auto raw_target_vel = get_tracing_detector_target_vel();
     double total_max_speed_xy =
@@ -590,6 +596,12 @@ void PlandController::step() {
   }
 
   case ControllerState::BLIND_DROP: {
+    // 若在下沉过程中重新看清目标，无缝切回高精度视觉闭环
+    if (detector_target_valid()) {
+      change_state(ControllerState::TRACING_DETECTOR);
+      return;
+    }
+
     double current_z = get_current_z();
     if (current_z > std::max(1.0, blind_drop_alt_ + 0.5)) {
       change_state(ControllerState::TARGET_LOST);
