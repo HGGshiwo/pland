@@ -66,7 +66,7 @@ class SimControllerGUI:
         self.gimbal_current_pitch = None
 
         # Board motion
-        self.motion_mode = "STOP"  # "STOP", "FORWARD", "BACKWARD", "SNAKE"
+        self.motion_mode = "STOP"  # "STOP", "FORWARD", "BACKWARD", "SNAKE", "CIRCLE"
         self.motion_speed = 0.5    # m/s
         self.motion_variance = 0.0 # (m/s)^2
         self.snake_radius = 3.0    # 转弯半径 (m)
@@ -364,6 +364,10 @@ class SimControllerGUI:
                                      bg="#E0E0E0", command=lambda: self.set_motion_mode("SNAKE"), width=14)
         self.btn_m_snake.pack(side=tk.LEFT, padx=3)
 
+        self.btn_m_circle = tk.Button(f_m_btns, text="Circle", font=("Arial", 9),
+                                      bg="#E0E0E0", command=lambda: self.set_motion_mode("CIRCLE"), width=10)
+        self.btn_m_circle.pack(side=tk.LEFT, padx=3)
+
         # 6. GPS Injection Control (Continuous Injection Switch Only)
         gps_frame = ttk.LabelFrame(right_frame, text="Target GPS Injection (/pland/inject_target_pose)", padding=6)
         gps_frame.pack(fill=tk.X, padx=4, pady=3)
@@ -564,7 +568,8 @@ class SimControllerGUI:
             "STOP": self.btn_m_stop,
             "FORWARD": self.btn_m_fwd,
             "BACKWARD": self.btn_m_back,
-            "SNAKE": self.btn_m_snake
+            "SNAKE": self.btn_m_snake,
+            "CIRCLE": self.btn_m_circle
         }
         for m, btn in modes.items():
             if m == mode:
@@ -629,6 +634,10 @@ class SimControllerGUI:
 
                 max_omega = max(2.0 * omega_max, 1.5)
                 cmd.angular.z = max(-max_omega, min(max_omega, omega_cmd))
+
+            elif mode == "CIRCLE":
+                cmd.linear.x = 1.0   # m/s
+                cmd.angular.z = 1.0  # rad/s (转弯半径约 1 m)
 
             self.pub_board_cmd_vel.publish(cmd)
             self.pub_board_cmd_vel_backup.publish(cmd)
