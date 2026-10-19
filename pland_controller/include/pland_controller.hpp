@@ -147,6 +147,11 @@ private:
   // 机架静态硬件配置 (静态加载，不参与 ParamSync 动态同步)
   double frame_height_ = 0.0;
 
+  // 融合高度切换阈值: base_z 低于 min 纯用测距仪, 高于 max 纯用 rel_alt/里程计,
+  // 中间线性过渡; 动态参数 (fusion_min_alt / fusion_max_alt)
+  double fusion_min_alt_ = 3.0;
+  double fusion_max_alt_ = 5.0;
+
 private:
   double get_current_z() const {
     double now = ros::Time::now().toSec();
@@ -163,19 +168,18 @@ private:
       return base_z;
     }
 
-    double min_alt = 1.0;
-    double max_alt = 3.0;
     // 测距仪进行机架物理高度补偿：起落架底端距离平面的真实高度
     double rf_z = std::max(0.0, rangefinder_alt_ - frame_height_);
 
-    if (base_z < min_alt) {
+    if (base_z < fusion_min_alt_) {
       return rf_z;
-    } else if (base_z > max_alt) {
-      return base_z;
-    } else {
-      double ratio = (base_z - min_alt) / (max_alt - min_alt);
-      return (1.0 - ratio) * rf_z + ratio * base_z;
     }
+    if (base_z > fusion_max_alt_ || fusion_max_alt_ <= fusion_min_alt_) {
+      return base_z;
+    }
+    double ratio = (base_z - fusion_min_alt_) /
+                   (fusion_max_alt_ - fusion_min_alt_);
+    return (1.0 - ratio) * rf_z + ratio * base_z;
   }
 
   void state_enter();

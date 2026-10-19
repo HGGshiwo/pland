@@ -27,6 +27,12 @@ max_funnel_radius: 0.15
 funnel_radius_k: 0.1
 max_ff_vel: 1.5
 lost_climb_vel: 0.4
+
+# ============ 融合高度切换阈值 (测距仪 vs rel_alt/里程计) ============
+# base_z 低于 min 纯用测距仪 (含机架高度补偿), 高于 max 纯用 rel_alt/里程计,
+# 中间线性过渡。min 需覆盖 rel_alt 气压零偏 (实测约 +1.4m)
+fusion_min_alt: 3.0
+fusion_max_alt: 5.0
 use_disarm: true
 use_ff_vel: true
 baseline_mode: false

@@ -138,6 +138,10 @@ void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("disable_all_enhancement", disable_all_enhancement_);
   sync.bind("enhance_mode", enhance_mode_);
 
+  // 融合高度切换阈值
+  sync.bind("fusion_min_alt", fusion_min_alt_);
+  sync.bind("fusion_max_alt", fusion_max_alt_);
+
   // CTRV-EKF 滤波动力学参数 (卡方门控、温和Q放大、物理限幅)
   sync.bind("ekf_chi2_nominal_thresh", ekf_chi2_nominal_thresh_,
             [&](const double &) { sync_ekf_params(); });

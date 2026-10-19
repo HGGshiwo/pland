@@ -96,6 +96,10 @@ void PlandController::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("max_ff_vel", max_ff_vel_);
   sync.bind("lost_climb_vel", lost_climb_vel_);
 
+  // 融合高度切换阈值
+  sync.bind("fusion_min_alt", fusion_min_alt_);
+  sync.bind("fusion_max_alt", fusion_max_alt_);
+
   // 行为与模式开关
   sync.bind("use_disarm", use_disarm_);
   sync.bind("use_ff_vel", use_ff_vel_);

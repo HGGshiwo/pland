@@ -117,6 +117,11 @@ private:
   double rel_alt_stamp_ = 0.0;
   double frame_height_ = 0.0;  // 机架高度: 起落架底端到测距仪安装面的物理距离
 
+  // 融合高度切换阈值: base_z 低于 min 纯用测距仪, 高于 max 纯用 rel_alt/里程计,
+  // 中间线性过渡; 动态参数 (fusion_min_alt / fusion_max_alt)
+  double fusion_min_alt_ = 3.0;
+  double fusion_max_alt_ = 5.0;
+
   std::unique_ptr<SafeAprilTagDetector> tag_detector_;
   std::unique_ptr<ITargetPattern> current_pattern_;
 
@@ -133,8 +138,9 @@ private:
   bool has_last_valid_pos_ = false;
 
 private:
-  // 融合高度: 低空 (<1m) 以测距仪 (含机架高度补偿) 为准, 1~3m 线性过渡, 高空用
-  // rel_alt/ENU 里程计; 与 pland_controller::get_current_z 保持一致
+  // 融合高度: 低空 (<fusion_min_alt_) 以测距仪 (含机架高度补偿) 为准,
+  // fusion_min_alt_~fusion_max_alt_ 线性过渡, 高空用 rel_alt/ENU 里程计;
+  // 与 pland_controller::get_current_z 保持一致
   double get_current_z() const {
     double now = ros::Time::now().toSec();
     double base_z = std::abs(pos_enu_.z());
@@ -148,18 +154,17 @@ private:
       return base_z;
     }
 
-    const double min_alt = 1.0;
-    const double max_alt = 3.0;
     double rf_z = std::max(0.0, rangefinder_alt_ - frame_height_);
 
-    if (base_z < min_alt) {
+    if (base_z < fusion_min_alt_) {
       return rf_z;
-    } else if (base_z > max_alt) {
-      return base_z;
-    } else {
-      double ratio = (base_z - min_alt) / (max_alt - min_alt);
-      return (1.0 - ratio) * rf_z + ratio * base_z;
     }
+    if (base_z > fusion_max_alt_ || fusion_max_alt_ <= fusion_min_alt_) {
+      return base_z;
+    }
+    double ratio = (base_z - fusion_min_alt_) /
+                   (fusion_max_alt_ - fusion_min_alt_);
+    return (1.0 - ratio) * rf_z + ratio * base_z;
   }
 
   // --- 图像粗检定位 ---
