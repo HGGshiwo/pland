@@ -137,6 +137,13 @@ private:
   Eigen::Vector3d last_valid_enu_pos_ = Eigen::Vector3d::Zero(); // 记录上一次有效位置
   bool has_last_valid_pos_ = false;
   bool enable_yaw_prior_ = true; // 姿态歧义消除的 yaw 先验纠偏开关 (false 时固定取 PnP 主解 pose1, 适用于墙面等绕水平轴二义场景)
+  double image_max_latency_ = 0.15; // 图像时间戳允许的最大滞后 (s), 超过则丢弃该帧不参与检测
+
+  // --- 耗时诊断 (观测用, 不影响逻辑) ---
+  std::chrono::steady_clock::time_point detect_start_;
+  std::chrono::steady_clock::time_point last_detect_entry_;
+  double last_detect_ms_ = 0.0;  // 上一帧 detect() 完整耗时
+  bool has_detect_timing_ = false;
 
 private:
   // 融合高度: 低空 (<fusion_min_alt_) 以测距仪 (含机架高度补偿) 为准,

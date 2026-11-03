@@ -12,6 +12,7 @@ enable_c2f_enhancement: true
 disable_all_enhancement: false # 总开关: 置 true 关闭全部增强 (含粗检ROI/超分锐化/CLAHE), 灰度直通
 enhance_mode: adaptive # 增强模式: none(直通) / sharpen(全图锐化) / roi(全高度ROI超分) / adaptive(高度自适应C2F, 部署默认)
 enable_yaw_prior: true # 姿态歧义消除的 yaw 先验纠偏开关 (false: 固定取 PnP 主解 pose1, 适用于墙面等绕水平轴二义场景)
+image_max_latency: 0.15 # 图像时间戳允许的最大滞后(s), 超时丢帧 (bag 回放/高延迟相机可调大)
 
 # ================= CTRV-EKF 滤波动力学参数 =================
 # 卡方检验正常机动阈值 (自由度 3, 95% 置信度)

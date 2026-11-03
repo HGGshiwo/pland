@@ -138,6 +138,7 @@ void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("disable_all_enhancement", disable_all_enhancement_);
   sync.bind("enhance_mode", enhance_mode_);
   sync.bind("enable_yaw_prior", enable_yaw_prior_);
+  sync.bind("image_max_latency", image_max_latency_);
 
   // 融合高度切换阈值
   sync.bind("fusion_min_alt", fusion_min_alt_);
@@ -209,6 +210,22 @@ cv::Rect PlandDetector::find_texture_roi(const cv::Mat &gray) const {
 void PlandDetector::detect(DetectorResult &output) {
   output.is_valid = false;
 
+  // 耗时诊断: 帧间隔 (detect 入口间距 = 真实处理频率) + 上一帧完整耗时
+  auto now_sc = std::chrono::steady_clock::now();
+  if (has_detect_timing_) {
+    double gap_ms = std::chrono::duration<double, std::milli>(
+                        now_sc - last_detect_entry_)
+                        .count();
+    double fps = (gap_ms > 1e-3) ? 1000.0 / gap_ms : 0.0;
+    ROS_INFO_THROTTLE(
+        2.0, "[PlandDetector] perf: detect_ms=%.1f proc_fps=%.1f "
+             "frame_gap_ms=%.1f",
+        last_detect_ms_, fps, gap_ms);
+  }
+  last_detect_entry_ = now_sc;
+  detect_start_ = now_sc;
+  has_detect_timing_ = true;
+
   // 1. 时间戳与历史状态获取 (时光机逻辑)
   auto stamp_tracker = image_stamp_;
   double now = ros::Time::now().toSec();
@@ -224,7 +241,7 @@ void PlandDetector::detect(DetectorResult &output) {
   output.target_speed = kf_xy_ ? kf_xy_->get_vel().norm() : 0.0;
 
   double elapsed = now - stamp_tracker;
-  if (elapsed > 0.15) {
+  if (elapsed > image_max_latency_) {
     ROS_WARN_STREAM("[PlandDetector] image stamp too late: " << elapsed);
     return;
   }
@@ -469,6 +486,12 @@ void PlandDetector::detect(DetectorResult &output) {
 
   // 发布目标位姿与速度话题 (ENU 坐标系)
   publish_target(output);
+
+  // 耗时诊断: 记录本帧完整耗时, 供下一帧入口日志输出
+  last_detect_ms_ =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - detect_start_)
+          .count();
 }
 
 void PlandDetector::update_pose(double t, Eigen::Vector3d pos) {
