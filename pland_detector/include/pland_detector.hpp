@@ -136,6 +136,7 @@ private:
 
   Eigen::Vector3d last_valid_enu_pos_ = Eigen::Vector3d::Zero(); // 记录上一次有效位置
   bool has_last_valid_pos_ = false;
+  bool enable_yaw_prior_ = true; // 姿态歧义消除的 yaw 先验纠偏开关 (false 时固定取 PnP 主解 pose1, 适用于墙面等绕水平轴二义场景)
 
 private:
   // 融合高度: 低空 (<fusion_min_alt_) 以测距仪 (含机架高度补偿) 为准,

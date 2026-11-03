@@ -137,6 +137,7 @@ void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("enable_c2f_enhancement", enable_c2f_enhancement_);
   sync.bind("disable_all_enhancement", disable_all_enhancement_);
   sync.bind("enhance_mode", enhance_mode_);
+  sync.bind("enable_yaw_prior", enable_yaw_prior_);
 
   // 融合高度切换阈值
   sync.bind("fusion_min_alt", fusion_min_alt_);
@@ -348,7 +349,7 @@ void PlandDetector::detect(DetectorResult &output) {
   double time_since_last_valid = stamp_tracker - last_ekf_stamp_;
   bool is_prior_reliable = has_last_valid_pos_ && (time_since_last_valid < 0.5);
 
-  if (obs.pose2.valid && is_prior_reliable) {
+  if (obs.pose2.valid && is_prior_reliable && enable_yaw_prior_) {
     auto get_yaw_from_pose = [&](const TargetPose &p) {
       Eigen::Matrix3d R_tag_world = hist_R_wb * (R_bc * p.R);
       return std::atan2(R_tag_world(1, 0), R_tag_world(0, 0));
