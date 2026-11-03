@@ -152,7 +152,10 @@ private:
                params.camera_offset.x(), params.camera_offset.y(),
                params.camera_offset.z());
 
-      auto read_axis = [&](GimbalAxisParams &axis, const std::string &name) {
+      // read_axis 同时读取该轴的兜底默认角 (gimbal_<axis>_default_deg, 度),
+      // 未提供则保留 GimbalParams 的缺省值 (pitch -90° 垂直向下)
+      auto read_axis = [&](GimbalAxisParams &axis, double &default_rad,
+                           const std::string &name) {
         const std::string prefix = "gimbal_" + name;
         if (config[prefix + "_topic"]) {
           axis.topic = config[prefix + "_topic"].as<std::string>();
@@ -166,13 +169,19 @@ private:
                      prefix.c_str(), frame.c_str());
           }
         }
-        ROS_INFO("[PlandDetectorNode] Gimbal %s: topic='%s', frame=%s",
+        if (config[prefix + "_default_deg"]) {
+          default_rad = config[prefix + "_default_deg"].as<double>() *
+                        (M_PI / 180.0);
+        }
+        ROS_INFO("[PlandDetectorNode] Gimbal %s: topic='%s', frame=%s, "
+                 "default=%.1f deg",
                  name.c_str(), axis.topic.c_str(),
-                 axis.frame == GimbalAngleFrame::kGround ? "ground" : "body");
+                 axis.frame == GimbalAngleFrame::kGround ? "ground" : "body",
+                 default_rad * 180.0 / M_PI);
       };
-      read_axis(params.roll, "roll");
-      read_axis(params.pitch, "pitch");
-      read_axis(params.yaw, "yaw");
+      read_axis(params.roll, params.default_roll, "roll");
+      read_axis(params.pitch, params.default_pitch, "pitch");
+      read_axis(params.yaw, params.default_yaw, "yaw");
 
       // 机架高度 (起落架底端到测距仪安装面), 用于低空融合高度补偿
       if (config["frame_height"]) {

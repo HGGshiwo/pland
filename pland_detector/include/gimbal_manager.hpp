@@ -19,6 +19,12 @@ struct GimbalParams {
   GimbalAxisParams roll;
   GimbalAxisParams pitch;
   GimbalAxisParams yaw;
+  // 各轴无回读话题/从未收到数据时的固定兜底角 (机体系 motor 角, 弧度)
+  // 默认: 垂直向下 90° 云台 (roll 0 / pitch -90° / yaw 0), 可由 drone_config
+  // 的 gimbal_<axis>_default_deg 覆盖 (如前向相机: gimbal_pitch_default_deg: 0)
+  double default_roll = 0.0;
+  double default_pitch = -M_PI_2;
+  double default_yaw = 0.0;
   // 相机光心相对 base_link 原点的位移 (机体系 FLU, 米, 云台中位姿态下量取)
   Eigen::Vector3d camera_offset = Eigen::Vector3d::Zero();
 };
@@ -31,8 +37,8 @@ struct GimbalParams {
  * 时间缓存与插值由外部 PoseHistory 完成, 本类不做任何时间对齐。
  *
  * 回读约定: 输入角度为弧度; 某轴参考系由 GimbalAxisParams::frame 描述;
- *          某轴从未收到回读(空 optional)时使用固定默认角 ——
- *          视作垂直向下 90° 的固定云台 (roll 0 / pitch -90° / yaw 0, 相对机体)。
+ *          某轴从未收到回读(空 optional)时使用 GimbalParams 中的固定兜底角 ——
+ *          默认视作垂直向下 90° 的固定云台 (roll 0 / pitch -90° / yaw 0, 相对机体)。
  * 绝对角换算: frame == kGround 的轴按 "云台角 与 同轴机体欧拉角相加/相减"
  *             逐轴补偿 (降落场景机体近水平, 欧拉角逐轴相减的耦合误差可忽略):
  *             pitch: motor = ground + 机体低头角   (低头为正)
@@ -57,10 +63,10 @@ public:
                          std::optional<double> gimbal_pitch,
                          std::optional<double> gimbal_yaw) const {
     const double roll =
-        resolve_axis(Axis::kRoll, gimbal_roll, kDefaultRoll, R_wb);
+        resolve_axis(Axis::kRoll, gimbal_roll, params_.default_roll, R_wb);
     const double pitch =
-        resolve_axis(Axis::kPitch, gimbal_pitch, kDefaultPitch, R_wb);
-    const double yaw = resolve_axis(Axis::kYaw, gimbal_yaw, kDefaultYaw, R_wb);
+        resolve_axis(Axis::kPitch, gimbal_pitch, params_.default_pitch, R_wb);
+    const double yaw = resolve_axis(Axis::kYaw, gimbal_yaw, params_.default_yaw, R_wb);
 
     // 云台电机旋转矩阵 (FRD 坐标系下 Z-Y-X 旋转)
     const Eigen::Matrix3d R_motor =
@@ -82,11 +88,6 @@ public:
 
 private:
   enum class Axis { kRoll, kPitch, kYaw };
-
-  // 无回读兜底: 固定云台, 垂直向下 90° (机体系 motor 角)
-  static constexpr double kDefaultRoll = 0.0;
-  static constexpr double kDefaultPitch = -M_PI_2;
-  static constexpr double kDefaultYaw = 0.0;
 
   // 相机光学系 (z 朝前, x 朝右, y 朝下) -> FRD (x 前, y 右, z 下)
   static Eigen::Matrix3d get_cam_to_frd_matrix() {
