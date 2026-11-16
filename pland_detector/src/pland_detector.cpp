@@ -2,6 +2,8 @@
 #include <cmath>
 #include <exception>
 
+#include <std_msgs/Float64.h>
+
 PnpResultBody PlandDetector::solve_pose_by_pnp(const TargetPose *safe_pose,
                                                const Eigen::Matrix3d &R_bc,
                                                const Eigen::Vector3d &t_bc) {
@@ -72,6 +74,7 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
   pnh.param<std::string>("target_vel_topic", target_vel_topic_, "/pland/target_vel");
   pnh.param<std::string>("debug_target_pose_topic", debug_target_pose_topic_, "/pland/target_pose_enu");
   pnh.param<std::string>("target_pixel_topic", target_pixel_topic_, "/pland/target_pixel");
+  pnh.param<std::string>("current_z_topic", current_z_topic_, "/pland/current_z");
 
   // 相机内参矩阵 (必须提供9个元素)
   std::vector<double> inner_matrix_vec;
@@ -109,6 +112,8 @@ void PlandDetector::init(ros::NodeHandle &nh, ros::NodeHandle &pnh) {
       nh_.advertise<geometry_msgs::PointStamped>(target_pixel_topic_, 10);
   tag_count_pub_ =
       nh_.advertise<std_msgs::Int32>(target_pose_topic_ + "_tag_count", 10);
+  current_z_pub_ =
+      nh_.advertise<std_msgs::Float64>(current_z_topic_, 10);
 
   // 加载tag配置文件
   if (!tag_config_file_path_.empty()) {
@@ -237,6 +242,10 @@ void PlandDetector::detect(DetectorResult &output) {
   double current_z = get_current_z();
   // OSD 状态快照：即使本帧检测失败，也携带最近一次估计的运动与高度状态
   output.drone_z = current_z;
+  // 融合高度诊断话题: 每帧无条件发布 (检测失败也发, 供 pytest/地面站监控)
+  std_msgs::Float64 current_z_msg;
+  current_z_msg.data = current_z;
+  current_z_pub_.publish(current_z_msg);
   output.target_moving = target_tracker_ && target_tracker_->isMoving();
   output.target_speed = kf_xy_ ? kf_xy_->get_vel().norm() : 0.0;
 

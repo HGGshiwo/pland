@@ -88,6 +88,7 @@ private:
   std::string target_vel_topic_ = "/pland/target_vel";
   std::string debug_target_pose_topic_ = "/pland/target_pose_enu";
   std::string target_pixel_topic_ = "/pland/target_pixel";
+  std::string current_z_topic_ = "/pland/current_z";
 
   ros::NodeHandle nh_;
   ros::Publisher target_pose_pub_;
@@ -97,6 +98,8 @@ private:
   ros::Publisher target_pixel_pub_;
   // 本帧原始检测到的 tag 数量 (供自动化评测脚本统计)
   ros::Publisher tag_count_pub_;
+  // 融合高度 (get_current_z 结果) 诊断话题
+  ros::Publisher current_z_pub_;
 
   // --- 状态成员变量 ---
   Eigen::Vector3d pos_enu_ = Eigen::Vector3d::Zero();
@@ -146,33 +149,33 @@ private:
   bool has_detect_timing_ = false;
 
 private:
-  // 融合高度: 低空 (<fusion_min_alt_) 以测距仪 (含机架高度补偿) 为准,
-  // fusion_min_alt_~fusion_max_alt_ 线性过渡, 高空用 rel_alt/ENU 里程计;
+  // 融合高度 (测距仪 ↔ rel_alt 混合, 阈值由测距仪裁决, odom 仅作最终兜底):
+  // 无测距仪 → rel_alt (1s 内), 再退 odom z;
+  // 有测距仪: rf_z < fusion_min_alt_ 纯测距仪, > fusion_max_alt_ (超量程) 纯
+  // rel_alt, 中间线性混合 —— 调度变量用 rf_z (离地真值), 防止 rel_alt 零偏 /
+  // odom 原点偏差接管近地判定;
   // 与 pland_controller::get_current_z 保持一致
   double get_current_z() const {
     double now = ros::Time::now().toSec();
-    double base_z = std::abs(pos_enu_.z());
-    if (has_rel_alt_ && (now - rel_alt_stamp_ < 1.0)) {
-      base_z = std::abs(rel_alt_);
-    }
+    bool rel_ok = has_rel_alt_ && (now - rel_alt_stamp_ < 1.0);
+    double rel_z = rel_ok ? std::abs(rel_alt_) : std::abs(pos_enu_.z());
 
     bool rf_valid = has_rangefinder_ && (rangefinder_alt_ > 0.0) &&
                     (now - rangefinder_stamp_ < 0.5);
     if (!rf_valid) {
-      return base_z;
+      return rel_z;
     }
-
     double rf_z = std::max(0.0, rangefinder_alt_ - frame_height_);
 
-    if (base_z < fusion_min_alt_) {
+    if (rf_z < fusion_min_alt_) {
       return rf_z;
     }
-    if (base_z > fusion_max_alt_ || fusion_max_alt_ <= fusion_min_alt_) {
-      return base_z;
+    if (rf_z > fusion_max_alt_) {
+      return rel_z;
     }
-    double ratio = (base_z - fusion_min_alt_) /
+    double ratio = (rf_z - fusion_min_alt_) /
                    (fusion_max_alt_ - fusion_min_alt_);
-    return (1.0 - ratio) * rf_z + ratio * base_z;
+    return (1.0 - ratio) * rf_z + ratio * rel_z;
   }
 
   // --- 图像粗检定位 ---

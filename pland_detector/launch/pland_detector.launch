@@ -11,6 +11,8 @@
     <arg name="target_vel_topic" default="/pland/target_vel" />
     <!-- 目标图像归一化像素坐标话题 (geometry_msgs/PointStamped, x=u/w, y=v/h) -->
     <arg name="target_pixel_topic" default="/pland/target_pixel" />
+    <!-- 融合高度诊断话题 (std_msgs/Float64, get_current_z 结果逐帧发布) -->
+    <arg name="current_z_topic" default="/pland/current_z" />
     <!-- 重置控制话题 (std_msgs/Empty) -->
     <arg name="reset_topic" default="/pland/reset" />
     <!-- 控制器状态机状态话题 (std_msgs/String, 用于调试图像 OSD 显示) -->
@@ -38,6 +40,7 @@
         <param name="debug_target_pose_topic" value="$(arg debug_target_pose_topic)" />
         <param name="target_vel_topic" value="$(arg target_vel_topic)" />
         <param name="target_pixel_topic" value="$(arg target_pixel_topic)" />
+        <param name="current_z_topic" value="$(arg current_z_topic)" />
         <param name="reset_topic" value="$(arg reset_topic)" />
         <param name="state_topic" value="$(arg state_topic)" />
 

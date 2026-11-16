@@ -430,7 +430,16 @@ void PlandController::fly_to(const Eigen::Vector3d &pos_enu,
   cmd.coordinate_frame = mavros_msgs::PositionTarget::FRAME_LOCAL_NED;
   cmd.position.x = pos_enu.x();
   cmd.position.y = pos_enu.y();
-  cmd.position.z = pos_enu.z();
+
+  // 期望高度按离地 (AGL) 语义解释, 实时换算回 odom 系:
+  // odom_z = AGL + (当前 odom z − 当前 rel_alt), 偏移量随原点漂移自动跟随;
+  // rel_alt 无效时退化为 odom 绝对值 (旧行为)
+  Eigen::Vector3d pos = pos_enu;
+  if (has_rel_alt_ && (ros::Time::now().toSec() - rel_alt_stamp_ < 1.0)) {
+    pos.z() += pos_enu_.z() - rel_alt_;
+  }
+  cmd.position.z = pos.z();
+
   cmd.velocity.x = vel_enu.x();
   cmd.velocity.y = vel_enu.y();
   cmd.velocity.z = vel_enu.z();
