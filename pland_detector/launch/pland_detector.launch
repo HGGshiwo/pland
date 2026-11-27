@@ -3,6 +3,9 @@
     <arg name="odom_topic" default="/mavros/local_position/odom" />
     <!-- 原始相机图像 -->
     <arg name="image_topic" default="/roscam/cam/image_raw" />
+    <!-- 压缩图像话题 (sensor_msgs/CompressedImage)。非空时优先使用它并忽略 image_topic，
+         节点内直接 imdecode，无需外部解码中转节点。默认空 = 走原始图像 -->
+    <arg name="image_compressed_topic" default="" />
     <!-- 标注与检测结果图像发布话题 -->
     <arg name="detect_topic" default="/pland/detect" />
     <!-- 目标机体相对位姿 (base_link FLU，供控制器闭环) 与 ENU 调试绝对位姿 (map，供RViz显示) -->
@@ -35,6 +38,7 @@
         <!-- 静态话题与构造参数 -->
         <param name="odom_topic" value="$(arg odom_topic)" />
         <param name="image_topic" value="$(arg image_topic)" />
+        <param name="image_compressed_topic" value="$(arg image_compressed_topic)" />
         <param name="detect_topic" value="$(arg detect_topic)" />
         <param name="target_pose_topic" value="$(arg target_pose_topic)" />
         <param name="debug_target_pose_topic" value="$(arg debug_target_pose_topic)" />

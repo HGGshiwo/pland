@@ -1,12 +1,14 @@
 #pragma once
 #include <Eigen/Dense>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <optional>
+#include <vector>
 #include <geometry_msgs/PointStamped.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
@@ -78,6 +80,15 @@ private:
   double ekf_nominal_max_yaw_acc_ = 0.5;
   double ekf_max_dv_acc_ = 0.8;
   double ekf_max_speed_ = 3.0;
+
+  // --- PnP 参数 (动态可调) ---
+  // 默认值与改造前的硬编码值完全一致, 不配置时行为不变
+  int pnp_min_tags_ = 1;              // 最少检出 tag 数, 少于此数不出解
+  double pnp_ransac_thresh_ = 8.0;    // RANSAC 重投影门限 (px)
+  double dist_k1_ = 0.0;              // 径向畸变 k1
+  double dist_k2_ = 0.0;              // 径向畸变 k2
+  double dist_p1_ = 0.0;              // 切向畸变 p1
+  double dist_p2_ = 0.0;              // 切向畸变 p2
 
   // --- 静态配置参数 (在 launch / 构造函数中指定) ---
   Eigen::Matrix3d camera_inner_matrix_ = Eigen::Matrix3d::Identity();
@@ -242,5 +253,24 @@ public:
                          ekf_nominal_max_yaw_acc_, ekf_max_dv_acc_,
                          ekf_max_speed_);
     }
+  }
+
+  /**
+   * @brief 把 PnP 参数 (门限/最少 tag 数/畸变系数) 推给当前图案策略
+   * 在 bind_dynamic_params 的回调与 load_tag_config 之后调用
+   */
+  void sync_pnp_params() {
+    if (!current_pattern_) {
+      return;
+    }
+    std::vector<double> dist;
+    if (std::abs(dist_k1_) > 1e-9 || std::abs(dist_k2_) > 1e-9 ||
+        std::abs(dist_p1_) > 1e-9 || std::abs(dist_p2_) > 1e-9) {
+      dist = {dist_k1_, dist_k2_, dist_p1_, dist_p2_};
+    }
+    current_pattern_->set_pnp_params(pnp_ransac_thresh_, pnp_min_tags_, dist);
+    ROS_INFO("[PlandDetector] PnP params: min_tags=%d, ransac_thresh=%.2fpx, "
+             "dist_coeffs=%zu",
+             pnp_min_tags_, pnp_ransac_thresh_, dist.size());
   }
 };

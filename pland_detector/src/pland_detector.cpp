@@ -37,6 +37,9 @@ bool PlandDetector::load_tag_config(const std::string &path) {
     }
     current_pattern_ =
         std::make_unique<MultiArrayTagsPattern>(layout_map);
+    // 注意: 此处不推送 PnP 参数。参数在 node 里 sync_.start() 之后统一推送,
+    // 因为 ParamSync 的初次 YAML 加载不触发 on_change 回调, 这里推的只会是
+    // 类内默认值, 既无意义也会让启动日志重复打印
     tag_config_file_path_ = path;
     ROS_INFO_STREAM("[PlandDetector] success load tag config from " << path);
     return true;
@@ -165,7 +168,20 @@ void PlandDetector::bind_dynamic_params(ros_param_sync::ParamSync &sync) {
   sync.bind("ekf_max_speed", ekf_max_speed_,
             [&](const double &) { sync_ekf_params(); });
 
-  sync_ekf_params();
+  // PnP 参数 (最少 tag 数 / RANSAC 门限 / 畸变系数)
+  // 默认值等价于改造前的硬编码行为, 不配置时输出不变
+  sync.bind("pnp_min_tags", pnp_min_tags_, [&](const int &) { sync_pnp_params(); });
+  sync.bind("pnp_ransac_thresh", pnp_ransac_thresh_,
+            [&](const double &) { sync_pnp_params(); });
+  sync.bind("dist_k1", dist_k1_, [&](const double &) { sync_pnp_params(); });
+  sync.bind("dist_k2", dist_k2_, [&](const double &) { sync_pnp_params(); });
+  sync.bind("dist_p1", dist_p1_, [&](const double &) { sync_pnp_params(); });
+  sync.bind("dist_p2", dist_p2_, [&](const double &) { sync_pnp_params(); });
+
+  // 注意: 这里不调用 sync_ekf_params() / sync_pnp_params()。
+  // bind 只注册, 此时 YAML 尚未加载 (sync_.start() 才加载), 推给下游的只会是
+  // 类内默认值; 而 load_from_yaml 不触发 on_change, 过了这一步就没有第二次机会。
+  // 正确的推送点在 node 里 sync_.start() 之后。
 }
 
 void PlandDetector::reset() {

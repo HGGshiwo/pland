@@ -5,6 +5,7 @@
 
 #include <ros/ros.h>
 #include <nav_msgs/Odometry.h>
+#include <sensor_msgs/CompressedImage.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/image_encodings.h>
 #include <sensor_msgs/Range.h>
@@ -25,6 +26,7 @@ public:
     // 1. 读取节点连接参数
     std::string odom_topic;
     std::string image_topic;
+    std::string image_compressed_topic;
     std::string detect_topic;
     std::string reset_topic;
     std::string state_topic;
@@ -34,6 +36,9 @@ public:
     // 默认从 MAVROS 读取里程计与位姿数据
     pnh_.param<std::string>("odom_topic", odom_topic, "/mavros/local_position/odom");
     pnh_.param<std::string>("image_topic", image_topic, "/roscam/cam/image_raw");
+    // 压缩图像话题 (sensor_msgs/CompressedImage)。非空时优先使用它, 忽略 image_topic;
+    // 默认为空 -> 走原生的 sensor_msgs/Image 路径 (与改造前一致)
+    pnh_.param<std::string>("image_compressed_topic", image_compressed_topic, "");
     pnh_.param<std::string>("detect_topic", detect_topic, "/pland/detect");
     pnh_.param<std::string>("reset_topic", reset_topic, "/pland/reset");
     pnh_.param<std::string>("state_topic", state_topic, "/pland/state");
@@ -81,10 +86,18 @@ public:
 
       // 启动 1s 轮询监控与自动写回
       sync_.start(1.0);
+
+      // ParamSync 的初次加载 (load_from_yaml) 不触发 on_change 回调, 必须在此
+      // 手动把参数推给下游, 否则 EKF / PnP 会一直使用类内默认值, YAML 里的改动不生效
+      detector_->sync_ekf_params();
+      detector_->sync_pnp_params();
     } else {
       pnh_.param<bool>("enable_detection", detection_enabled_, true);
       pnh_.param<bool>("publish_debug_image", publish_debug_image_, true);
       pnh_.param<bool>("gimbal_in_degrees", gimbal_in_degrees_, true);
+      // 无 YAML 时用类内默认值, 仍需推一次保证下游与成员一致
+      detector_->sync_ekf_params();
+      detector_->sync_pnp_params();
     }
 
     // 4. 发布调试标注图像
@@ -116,7 +129,23 @@ public:
     }
 
     // 7. 订阅图像输入
-    sub_image_ = nh_.subscribe(image_topic, 1, &PlandDetectorNode::imageCallback, this);
+    //    二选一: 配置了 image_compressed_topic 就只订阅压缩图 (两者都配时以压缩图为准),
+    //    否则保持原有 sensor_msgs/Image 路径。压缩图在回调内 imdecode, 省掉中转节点。
+    if (!image_compressed_topic.empty()) {
+      if (!image_topic.empty()) {
+        ROS_WARN("[PlandDetectorNode] both image topics configured, using compressed "
+                 "only: %s (image_topic '%s' ignored)",
+                 image_compressed_topic.c_str(), image_topic.c_str());
+      }
+      sub_image_compressed_ =
+          nh_.subscribe(image_compressed_topic, 1,
+                        &PlandDetectorNode::compressedImageCallback, this);
+    } else if (!image_topic.empty()) {
+      sub_image_ = nh_.subscribe(image_topic, 1, &PlandDetectorNode::imageCallback, this);
+    } else {
+      ROS_ERROR("[PlandDetectorNode] both image_topic and image_compressed_topic are "
+                "empty, no image input!");
+    }
 
     // 8. Reset 话题订阅
     sub_reset_ = nh_.subscribe(reset_topic, 10, &PlandDetectorNode::resetTopicCallback, this);
@@ -126,7 +155,12 @@ public:
 
     ROS_INFO("[PlandDetectorNode] Initialized.");
     ROS_INFO("[PlandDetectorNode] Subscribing to odom: %s", odom_topic.c_str());
-    ROS_INFO("[PlandDetectorNode] Subscribing to image: %s", image_topic.c_str());
+    if (!image_compressed_topic.empty()) {
+      ROS_INFO("[PlandDetectorNode] Subscribing to compressed image: %s",
+               image_compressed_topic.c_str());
+    } else {
+      ROS_INFO("[PlandDetectorNode] Subscribing to image: %s", image_topic.c_str());
+    }
     ROS_INFO("[PlandDetectorNode] Subscribing to reset: %s", reset_topic.c_str());
     ROS_INFO("[PlandDetectorNode] Subscribing to gimbal: roll='%s', pitch='%s', yaw='%s'",
              gimbal_params.roll.topic.c_str(), gimbal_params.pitch.topic.c_str(),
@@ -275,12 +309,43 @@ private:
       return;
     }
 
-    double t = msg->header.stamp.toSec();
+    process_image(msg->header, cv_ptr->image);
+  }
+
+  /**
+   * @brief 压缩图像回调 (sensor_msgs/CompressedImage)
+   * 就地 imdecode 后与 raw 路径共用 process_image, 省掉外部 decode 中转节点。
+   * header 原样透传 (保留相机时钟), 供 detector 的时光机插值与 image_max_latency 判断。
+   */
+  void compressedImageCallback(const sensor_msgs::CompressedImageConstPtr &msg) {
+    if (!detection_enabled_) {
+      return;
+    }
+    if (msg->data.empty()) {
+      return;
+    }
+    cv::Mat buf(1, static_cast<int>(msg->data.size()), CV_8UC1,
+                const_cast<uint8_t *>(msg->data.data()));
+    cv::Mat bgr = cv::imdecode(buf, cv::IMREAD_COLOR);
+    if (bgr.empty()) {
+      ROS_WARN_STREAM_THROTTLE(
+          2.0, "[PlandDetectorNode] compressed image decode failed (format='"
+                   << msg->format << "', bytes=" << msg->data.size() << ")");
+      return;
+    }
+    process_image(msg->header, bgr);
+  }
+
+  /**
+   * @brief 图像处理主流程 (raw / compressed 共用)
+   */
+  void process_image(const std_msgs::Header &header, const cv::Mat &bgr) {
+    double t = header.stamp.toSec();
     if (t <= 0.0) {
       t = ros::Time::now().toSec();
     }
 
-    detector_->update_image(t, cv_ptr->image);
+    detector_->update_image(t, bgr);
 
     DetectorResult result;
     detector_->detect(result);
@@ -288,7 +353,7 @@ private:
     if (publish_debug_image_ && debug_image_pub_.getNumSubscribers() > 0 && !result.detected.empty()) {
       draw_osd(result.detected, result);
       sensor_msgs::ImagePtr out_msg =
-          cv_bridge::CvImage(msg->header, "bgr8", result.detected).toImageMsg();
+          cv_bridge::CvImage(header, "bgr8", result.detected).toImageMsg();
       debug_image_pub_.publish(out_msg);
     }
   }
@@ -404,6 +469,7 @@ private:
   ros::Subscriber sub_rangefinder_;
   ros::Subscriber sub_rel_alt_;
   ros::Subscriber sub_image_;
+  ros::Subscriber sub_image_compressed_;
   ros::Subscriber sub_gimbal_roll_;
   ros::Subscriber sub_gimbal_pitch_;
   ros::Subscriber sub_gimbal_yaw_;

@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <map>
 #include <opencv2/opencv.hpp>
 #include <stdexcept>
@@ -16,11 +18,41 @@ class MultiArrayTagsPattern : public ITargetPattern {
     // 键为 Tag ID，值为 4 个角点的 3D 坐标 (顺序: 左下, 右下, 右上, 左上)
     LayoutMap tag_3d_layout_;
 
+    // --- PnP 参数 (可由 set_pnp_params 运行时覆盖, 默认值等价于无畸变 + 单 tag 出解) ---
+    double ransac_thresh_px_ = 8.0;  // RANSAC 重投影门限 (px)
+    int min_tags_ = 1;               // 最少检出 tag 数, 少于此数不出解
+    std::vector<double> dist_coeffs_;  // 畸变系数 (k1,k2,p1,p2[,k3]), 空=无畸变
+
    public:
     MultiArrayTagsPattern(const LayoutMap& tag_3d_layout)
         : tag_3d_layout_(tag_3d_layout) {
         if (tag_3d_layout_.empty()) {
             throw std::runtime_error("[Pland] no config found!");
+        }
+    }
+
+    /**
+     * @brief 设置 PnP 参数: RANSAC 门限 / 最少 tag 数 / 畸变系数
+     * 畸变系数为空 (或全零) 时按无畸变处理, 与旧行为一致
+     */
+    void set_pnp_params(double ransac_thresh_px, int min_tags,
+                        const std::vector<double>& dist_coeffs) override {
+        ransac_thresh_px_ =
+            std::min(20.0, std::max(0.2, ransac_thresh_px));  // 防止误配成 0
+        min_tags_ = std::min(10, std::max(1, min_tags));
+        // 只接受 4/5/8 个系数, 其余视为无畸变
+        const size_t n = dist_coeffs.size();
+        if (n == 4 || n == 5 || n == 8) {
+            bool all_zero = true;
+            for (double d : dist_coeffs) {
+                if (std::abs(d) > 1e-9) {
+                    all_zero = false;
+                    break;
+                }
+            }
+            dist_coeffs_ = all_zero ? std::vector<double>() : dist_coeffs;
+        } else {
+            dist_coeffs_.clear();
         }
     }
 
@@ -69,22 +101,35 @@ class MultiArrayTagsPattern : public ITargetPattern {
         }
 
         // 2. 联合解算 (核心聚类步骤)
-        // 至少需要 4 个点 (1 个 Tag) 才能解算，但点越多越精确
-        if (image_points.size() >= 4) {
+        // 至少需要 min_tags_ 个 Tag (即 4*min_tags_ 个点) 才出解:
+        // 单个 tag 只有 4 个共面点, 深度方向不可观, 会解出米级跳变,
+        // 因此由 min_tags_ 门控 (默认 1 = 旧行为, 近距离/小靶标场景建议 >=2)
+        if (image_points.size() >= static_cast<size_t>(4 * min_tags_)) {
             cv::Mat rvec, tvec;
             cv::Mat camera_matrix =
                 (cv::Mat_<double>(3, 3) << cam_K(0, 0), cam_K(0, 1),
                  cam_K(0, 2), cam_K(1, 0), cam_K(1, 1), cam_K(1, 2),
                  cam_K(2, 0), cam_K(2, 1), cam_K(2, 2));
-            cv::Mat dist_coeffs =
-                cv::Mat::zeros(4, 1, CV_64F);  // 假设图像已去畸变
+
+            // 畸变系数: 未配置时用全零 (等价于"图像已去畸变", 与旧行为一致)
+            cv::Mat dist_coeffs;
+            if (dist_coeffs_.empty()) {
+                dist_coeffs = cv::Mat::zeros(4, 1, CV_64F);
+            } else {
+                dist_coeffs =
+                    cv::Mat(static_cast<int>(dist_coeffs_.size()), 1, CV_64F,
+                            const_cast<double*>(dist_coeffs_.data()))
+                        .clone();
+            }
 
             // 使用 RANSAC
             // 进行解算，这能有效剔除误识别的单帧噪点，实现你想要的"提取精确解"
-            bool success =
-                cv::solvePnPRansac(object_points, image_points, camera_matrix,
-                                   dist_coeffs, rvec, tvec, false, 100, 8.0,
-                                   0.99, cv::noArray(), cv::SOLVEPNP_ITERATIVE);
+            // 注意: ransac_thresh_px_ 必须显著小于 tag 的成像尺寸 (否则错解也会
+            // 落在门限内被当成内点); 默认 8.0 px 只适用于大靶标
+            bool success = cv::solvePnPRansac(
+                object_points, image_points, camera_matrix, dist_coeffs, rvec,
+                tvec, false, 100, ransac_thresh_px_, 0.99, cv::noArray(),
+                cv::SOLVEPNP_ITERATIVE);
 
             if (success) {
                 obs.is_valid = true;
